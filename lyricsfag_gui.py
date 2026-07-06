@@ -59,6 +59,7 @@ except ImportError as exc:  # pragma: no cover - tkinter is bundled with CPython
 from lyricsfag_lib.audio import iter_audio_files  # noqa: E402
 from lyricsfag_lib.audio_analysis import (  # noqa: E402
     SUPPORTED_MODELS as _SUPPORTED_AUDIO_MODELS,
+    describe_models_layout,
     warn_first_run_aggregate,
 )
 from lyricsfag_lib.device import (  # noqa: E402
@@ -85,7 +86,6 @@ from lyricsfag import (  # noqa: E402
     STATUS_SKIPPED,
     STATUS_WRITTEN,
     ProcessOutcome,
-    _format_provider_breakdown,
     _format_summary_lines,
     process_one,
 )
@@ -111,6 +111,129 @@ class QueueHandler(logging.Handler):
             self.queue.put_nowait(("log", record))
         except queue.Full:  # pragma: no cover - queue is unbounded
             pass
+
+
+# ---------------------------------------------------------------------------
+# Tooltip helper
+# ---------------------------------------------------------------------------
+
+
+class Tooltip:
+    """Lightweight Toplevel-based tooltip for any Tk/ttk widget.
+
+    Tk's bundled ttk theme engine has no native balloon/tooltip widget,
+    so we attach one tied to ``<Enter>``/``<Leave>`` events. We deliberately
+    *don't* depend on the optional ``tkinter.tix`` Balloon widget -- tix
+    isn't always bundled on Linux and it carries its own visual theme
+    that fights our dark log panel.
+
+    ``delay_ms`` controls how long the pointer must hover before the
+    balloon becomes visible (defaults to 500 ms). The balloon auto-hides
+    when the pointer leaves the bound widget OR after ``timeout_ms``
+    (defaults to 8 s; long enough to read a three-line tip, short enough
+    not to outstay its welcome on quick glances).
+    """
+
+    def __init__(
+        self,
+        widget: tk.Widget,
+        text: str,
+        *,
+        delay_ms: int = 500,
+        timeout_ms: int = 8000,
+    ) -> None:
+        self.widget = widget
+        self.text = text
+        self.delay_ms = delay_ms
+        self.timeout_ms = timeout_ms
+        self._tip: Optional[tk.Toplevel] = None
+        self._after_id: Optional[str] = None
+        self._hide_id: Optional[str] = None
+        widget.bind("<Enter>", self._on_enter, add="+")
+        widget.bind("<Leave>", self._on_leave, add="+")
+        widget.bind("<ButtonPress>", self._on_leave, add="+")
+
+    def _on_enter(self, _event=None) -> None:
+        # Cancel any in-flight hide so a quick ``leave -> enter`` doesn't
+        # flash the balloon twice.
+        if self._hide_id is not None:
+            try:
+                self.widget.after_cancel(self._hide_id)
+            except Exception:
+                pass
+            self._hide_id = None
+        self._after_id = self.widget.after(self.delay_ms, self._show)
+
+    def _on_leave(self, _event=None) -> None:
+        if self._after_id is not None:
+            try:
+                self.widget.after_cancel(self._after_id)
+            except Exception:
+                pass
+            self._after_id = None
+        self.hide()
+
+    def _show(self) -> None:
+        if self._tip is not None:
+            return
+        # Position the balloon a few pixels below-left of the cursor so
+        # it doesn't fight with the bound widget for the same screen
+        # real estate. ``winfo_pointerxy`` keeps the placement stable
+        # across high-DPI displays on Windows / X11.
+        x = self.widget.winfo_pointerx() + 12
+        y = self.widget.winfo_pointery() + 18
+        tip = tk.Toplevel(self.widget)
+        tip.wm_overrideredirect(True)  # no window decorations
+        tip.wm_geometry(f"+{x}+{y}")
+        label = tk.Label(
+            tip,
+            text=self.text,
+            justify="left",
+            background="#333333",
+            foreground="#f0f0f0",
+            relief="solid",
+            borderwidth=1,
+            padx=8,
+            pady=5,
+            font=("Segoe UI", 9),
+            wraplength=320,
+        )
+        label.pack()
+        self._tip = tip
+        # Auto-hide after ``timeout_ms`` so the tooltip doesn't linger
+        # when the user walked away from the window with one open.
+        self._hide_id = self.widget.after(self.timeout_ms, self.hide)
+
+    def hide(self) -> None:
+        if self._hide_id is not None:
+            try:
+                self.widget.after_cancel(self._hide_id)
+            except Exception:
+                pass
+            self._hide_id = None
+        if self._tip is not None:
+            try:
+                self._tip.destroy()
+            except Exception:
+                pass
+            self._tip = None
+
+
+# Help dialog body (used both by the ``Help`` button and by the popup
+# we emit on a clean Stop). Kept module-level so it's easy to tweak
+# without re-running the GUI.
+HELP_DIALOG_BODY = (
+    "LyricsFAG scans a music folder and writes a synced (.lrc) lyrics "
+    "file next to every track, in this exact order:\n\n"
+    "  1. LRCLIB.net  -- free, fast, community-maintained.\n"
+    "  2. Genius      -- needs an API token (Field on the left, or env "
+    "GENIUS_ACCESS_TOKEN).\n"
+    "  3. Local       -- only if you tick \u201cUse audio analysis\u201d. "
+    "Pre-seeds Whisper (~150 MB) and Demucs (~84 MB) into the models/ "
+    "folder next to this script on first use.\n\n"
+    "Tip: dry-run + a small test folder is the safest way to verify "
+    "your config before running on a 300-track batch."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -209,6 +332,23 @@ def _build_audio_analyzer(cfg: JobConfig, ui_queue: "queue.Queue"):
     }
     badge_text, badge_fg = format_device_badge(snap)
     ui_queue.put_nowait(("device_info", badge_text, badge_fg))
+    # Surface the on-disk layout so users can locate their weights
+    # without grepping the source. ``whisper_repo`` is ``None`` when we
+    # will fall back to the HuggingFace cache on first use; ``demucs``
+    # is always concrete but only consumed when its ``.th`` files are
+    # already seeded (otherwise it falls back to ``~/.cache/torch/hub``).
+    whisper_repo, demucs_repo = describe_models_layout(
+        audio_model=cfg.audio_model,
+        audio_model_path=cfg.audio_model_path,
+    )
+    LOG.info(
+        "Audio-analysis weights path layout:\n"
+        "    whisper  -> %s\n"
+        "    demucs   -> %s\n"
+        "(either will be populated on first use; both live under models/ next to the script)",
+        whisper_repo or "<HuggingFace cache (auto-downloaded on first use)>",
+        demucs_repo,
+    )
     LOG.info("Audio fallback: %s", analyzer.describe())
     return analyzer
 
@@ -225,7 +365,11 @@ def _run_worker(
         ui_queue.put_nowait(("scan_complete", total))
         if total == 0:
             LOG.warning("No audio files found under %s", cfg.root)
-            ui_queue.put_nowait(("job_done", cfg.dry_run, 0, 0, 0, 0, 0, 0.0))
+            # No files -> nothing to write AND nothing to summarise;
+            # emit a dedicated event so the GUI can suppress the
+            # completion popup (a "Done in 0.0s -- written=0" popup
+            # would just be noise). Summary text still gets populated.
+            ui_queue.put_nowait(("job_empty", cfg.dry_run, 0, 0, 0, 0, 0, 0.0))
             return
 
         audio_analyzer = _build_audio_analyzer(cfg, ui_queue)
@@ -300,8 +444,12 @@ def _run_worker(
         LOG.info(done_line)
         if breakdown_line:
             LOG.info(breakdown_line)
-        ui_queue.put_nowait((
-            "job_done",
+        # Distinguish "user pressed Stop" from "finished naturally" via
+        # the queue event name so the GUI can pop a different summary
+        # header. ``stop_event.is_set()`` is sticky after ``_on_stop``
+        # fires and survives until :meth:`_on_start` clears it.
+        finish_kind = "job_stopped" if stop_event.is_set() else "job_done"
+        payload = (
             cfg.dry_run,
             counters[STATUS_WRITTEN],
             counters[STATUS_DRY_RUN],
@@ -310,7 +458,8 @@ def _run_worker(
             counters[STATUS_FAILED],
             elapsed,
             by_provider,
-        ))
+        )
+        ui_queue.put_nowait((finish_kind, *payload))
     except Exception as exc:  # last-line defence -- surface to UI
         LOG.error("Worker crashed: %s", exc)
         LOG.error(
@@ -329,7 +478,6 @@ class LyricsFAGApp(tk.Tk):
     """Tkinter root window.  All widget construction lives in one place."""
 
     POLL_MS = 80  # how often the main thread drains the queue
-    COLOUR_BG = "#1e1e1e"
     COLOUR_FG = "#e4e4e4"
     COLOUR_LOG_BG = "#181818"
 
@@ -380,100 +528,121 @@ class LyricsFAGApp(tk.Tk):
             row=1, column=0, sticky="w", padx=(0, 6)
         )
         self.folder_var = tk.StringVar(value=self._last_folder)
-        ttk.Entry(outer, textvariable=self.folder_var).grid(
-            row=1, column=1, sticky="ew", padx=(0, 6)
-        )
-        ttk.Button(
+        self.folder_entry = ttk.Entry(outer, textvariable=self.folder_var)
+        self.folder_entry.grid(row=1, column=1, sticky="ew", padx=(0, 6))
+        self.browse_btn = ttk.Button(
             outer, text="Browse...", command=self._on_browse
-        ).grid(row=1, column=2)
+        )
+        self.browse_btn.grid(row=1, column=2)
 
         # Options row
         opts = ttk.Frame(outer)
         opts.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(10, 6))
         self.recursive_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(opts, text="Recursive", variable=self.recursive_var).pack(
-            side="left", padx=(0, 14)
+        self.recursive_cb = ttk.Checkbutton(
+            opts, text="Recursive", variable=self.recursive_var
         )
+        self.recursive_cb.pack(side="left", padx=(0, 14))
         self.force_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
+        self.force_cb = ttk.Checkbutton(
             opts, text="Force overwrite LRC", variable=self.force_var
-        ).pack(side="left", padx=(0, 14))
-        self.dry_run_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(opts, text="Dry-run", variable=self.dry_run_var).pack(
-            side="left", padx=(0, 14)
         )
+        self.force_cb.pack(side="left", padx=(0, 14))
+        self.dry_run_var = tk.BooleanVar(value=False)
+        self.dry_run_cb = ttk.Checkbutton(opts, text="Dry-run", variable=self.dry_run_var)
+        self.dry_run_cb.pack(side="left", padx=(0, 14))
         self.use_audio_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
+        self.use_audio_cb = ttk.Checkbutton(
             opts, text="Use audio analysis (local)", variable=self.use_audio_var
-        ).pack(side="left")
+        )
+        self.use_audio_cb.pack(side="left")
 
         # Source row
         src = ttk.Frame(outer)
         src.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(0, 6))
         ttk.Label(src, text="Source:").pack(side="left", padx=(0, 6))
         self.source_var = tk.StringVar(value="auto")
-        ttk.Combobox(
+        self.source_combo = ttk.Combobox(
             src,
             textvariable=self.source_var,
             values=("auto", "lrclib", "genius"),
             state="readonly",
             width=10,
-        ).pack(side="left", padx=(0, 16))
+        )
+        self.source_combo.pack(side="left", padx=(0, 16))
 
         ttk.Label(src, text=f"Genius token (env: {ENV_GENIUS_TOKEN}):").pack(
             side="left", padx=(0, 6)
         )
         self.genius_var = tk.StringVar(value=os.environ.get(ENV_GENIUS_TOKEN, ""))
-        ttk.Entry(src, textvariable=self.genius_var, width=30, show="\u2022").pack(
-            side="left", fill="x", expand=True
+        self.genius_entry = ttk.Entry(
+            src, textvariable=self.genius_var, width=30, show="\u2022"
         )
+        self.genius_entry.pack(side="left", fill="x", expand=True)
 
         # Audio-analysis panel (two sub-rows: model+device+demucs / model path).
         audio_row = ttk.Frame(outer)
         audio_row.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(0, 6))
         audio_row.columnconfigure(3, weight=1)
 
-        ttk.Label(audio_row, text="Whisper model:").grid(
+        self.audio_model_label = ttk.Label(audio_row, text="Whisper model:")
+        self.audio_model_label.grid(
             row=0, column=0, sticky="w", padx=(0, 6)
         )
         self.audio_model_var = tk.StringVar(value="base")
-        ttk.Combobox(
+        self.audio_model_combo = ttk.Combobox(
             audio_row,
             textvariable=self.audio_model_var,
             values=_SUPPORTED_AUDIO_MODELS,
             state="readonly",
             width=10,
-        ).grid(row=0, column=1, sticky="w")
+        )
+        self.audio_model_combo.grid(row=0, column=1, sticky="w")
 
-        ttk.Label(audio_row, text="Device:").grid(
+        # Renamed to ``audio_device_label`` so the *status-row* badge
+        # label below can keep its media name ``device_label``. Last
+        # ``self.X = ...`` assignment silently wins, and we DON'T want
+        # ``_paint_initial_device_badge`` to recolour the wrong widget
+        # just because the audio row added a label of the same name.
+        self.audio_device_label = ttk.Label(audio_row, text="Device:")
+        self.audio_device_label.grid(
             row=0, column=2, sticky="e", padx=(16, 6)
         )
         self.device_choice_var = tk.StringVar(value="auto")
-        ttk.Combobox(
+        self.device_combo = ttk.Combobox(
             audio_row,
             textvariable=self.device_choice_var,
             values=("auto", "cuda", "cpu"),
             state="readonly",
             width=8,
-        ).grid(row=0, column=3, sticky="w")
+        )
+        self.device_combo.grid(row=0, column=3, sticky="w")
 
-        ttk.Label(audio_row, text="Demucs:").grid(
+        self.demucs_label = ttk.Label(audio_row, text="Demucs:")
+        self.demucs_label.grid(
             row=0, column=4, sticky="e", padx=(16, 6)
         )
         self.demucs_var = tk.StringVar(value="on")
-        ttk.Combobox(
+        self.demucs_combo = ttk.Combobox(
             audio_row,
             textvariable=self.demucs_var,
             values=("on", "off"),
             state="readonly",
             width=8,
-        ).grid(row=0, column=5, sticky="w")
+        )
+        self.demucs_combo.grid(row=0, column=5, sticky="w")
 
-        ttk.Label(audio_row, text="Model path (optional):").grid(
+        self.audio_model_path_label = ttk.Label(
+            audio_row, text="Model path (optional):"
+        )
+        self.audio_model_path_label.grid(
             row=1, column=0, sticky="w", padx=(0, 6), pady=(6, 0)
         )
         self.audio_model_path_var = tk.StringVar(value="")
-        ttk.Entry(audio_row, textvariable=self.audio_model_path_var).grid(
+        self.audio_model_path_entry = ttk.Entry(
+            audio_row, textvariable=self.audio_model_path_var
+        )
+        self.audio_model_path_entry.grid(
             row=1, column=1, columnspan=5, sticky="ew", pady=(6, 0)
         )
 
@@ -486,9 +655,14 @@ class LyricsFAGApp(tk.Tk):
             btns, text="Stop", command=self._on_stop, state="disabled"
         )
         self.stop_btn.pack(side="left", padx=(0, 6))
-        ttk.Button(
+        self.open_out_btn = ttk.Button(
             btns, text="Open output folder", command=self._on_open_out
-        ).pack(side="left", padx=(0, 6))
+        )
+        self.open_out_btn.pack(side="left", padx=(0, 6))
+        self.help_btn = ttk.Button(
+            btns, text="?  Help", command=self._on_help, width=8
+        )
+        self.help_btn.pack(side="right")
 
         # Progress bar
         self.progress = ttk.Progressbar(outer, mode="determinate", maximum=100)
@@ -551,6 +725,170 @@ class LyricsFAGApp(tk.Tk):
         outer.columnconfigure(1, weight=1)
         outer.rowconfigure(8, weight=1)
 
+        # Tooltips: attach AFTER the rest of the geometry is wired so the
+        # bound widgets actually exist when we read their bounding boxes.
+        # ``add="+"`` on every tooltip bind keeps any future handlers
+        # intact rather than replacing them.
+        self._tooltips: list[Tooltip] = []
+        self._attach_tooltips()
+
+    def _attach_tooltips(self) -> None:
+        """Bind :class:`Tooltip` to every widget worth explaining.
+
+        Uses the stable ``self.<name>`` handles captured during widget
+        construction in :meth:`_build_widgets` so we don't depend on
+        ``grid_slaves`` walking the tree at construction time (which is
+        fragile when geometry hasn't settled yet). Mouseover delay is
+        500 ms; balloons auto-dismiss after 8 s.
+        """
+        _t = self._tooltip
+        # One declared (widget-handle, tooltip-text) per row below so a
+        # future tweak only needs to edit one line rather than chase the
+        # ``self.<name>`` handle through the constructor.
+        bindings: list[tuple[Optional[tk.Widget], str]] = [
+            (
+                getattr(self, "folder_entry", None),
+                "Folder containing your audio files.\n"
+                "Recursive scan matches every supported format\n"
+                "(.flac/.mp3/.m4a/.ogg/.opus/.wma/.wav/.ape/.mp4/...).",
+            ),
+            (
+                getattr(self, "browse_btn", None),
+                "Pick the music folder via the OS file dialog.\n"
+                "Defaults to your home folder.",
+            ),
+            (
+                getattr(self, "recursive_cb", None),
+                "Walk into subfolders. Disable to only\n"
+                "process the top-level folder you picked.",
+            ),
+            (
+                getattr(self, "force_cb", None),
+                "Overwrite existing .lrc files.\n"
+                "Use after upgrading LyricsFAG or to\n"
+                "refresh lyrics from a different source.",
+            ),
+            (
+                getattr(self, "dry_run_cb", None),
+                "Print what WOULD be written without\n"
+                "creating any .lrc files. Safe to run\n"
+                "on your whole library to sanity-check.",
+            ),
+            (
+                getattr(self, "use_audio_cb", None),
+                "Local transcription fallback.\n"
+                "First run downloads Whisper (~150 MB)\n"
+                "and Demucs (~84 MB) into models/ near\n"
+                "this script if they aren't already.",
+            ),
+            (
+                getattr(self, "source_combo", None),
+                "auto \u2192 LRCLIB first, then Genius, then local audio.\n"
+                "lrclib / genius \u2192 only that source.\n"
+                "audio \u2192 local Whisper only (skips web calls).",
+            ),
+            (
+                getattr(self, "genius_entry", None),
+                "Get a free token at genius.com/api-clients.\n"
+                "Or set env var GENIUS_ACCESS_TOKEN.",
+            ),
+            (
+                getattr(self, "audio_model_combo", None),
+                "Larger = slower but more accurate.\n"
+                "base (~150 MB) is the sensible default.\n"
+                "large-v3 needs ~3 GB and a GPU.",
+            ),
+            (
+                getattr(self, "device_combo", None),
+                "auto \u2192 CUDA if available, else CPU.\n"
+                "cuda is ~20x faster on supported GPUs.\n"
+                "Demucs on CPU is slow (~5-10x realtime).",
+            ),
+            (
+                getattr(self, "demucs_combo", None),
+                "Vocal isolation pre-stage.\n"
+                "OFF = Whisper runs on the raw stereo mix.\n"
+                "ON  = cleaner lyrics on dense songs,\n"
+                "       +84 MB weights (htdemucs_ft).",
+            ),
+            (
+                getattr(self, "audio_model_path_entry", None),
+                "Optional. Path to a faster-whisper model\n"
+                "directory you already downloaded.\n"
+                "Leave blank to auto-download on first use.",
+            ),
+            (
+                getattr(self, "start_btn", None),
+                "Start the LyricsFAG scan with the current settings.\n"
+                "Auto-saves them to settings.json first.",
+            ),
+            (
+                getattr(self, "stop_btn", None),
+                "Stop the run after the current file (or transcription\n"
+                "segment). The log panel keeps whatever was already\n"
+                "written; Ctrl+C equivalent.",
+            ),
+            (
+                getattr(self, "open_out_btn", None),
+                "Open the music folder in your OS file manager\n"
+                "(Explorer/Finder/Nautilus) so you can verify\n"
+                "the new .lrc files.",
+            ),
+            (
+                getattr(self, "help_btn", None),
+                "Quick-start instructions (provider order, token hint,\n"
+                "first-run downloads, dry-run tip).",
+            ),
+        ]
+        for widget, text in bindings:
+            _t(widget, text)
+
+    def _tooltip(self, widget: Optional[tk.Widget], text: str) -> None:
+        """Attach a :class:`Tooltip`; silently no-op if ``widget`` is None.
+
+        Centralising this so :meth:`_attach_tooltips` can call ``_t(widget,
+        "...")`` uniformly without each call site re-checking ``None``.
+        """
+        if widget is None or not text:
+            return
+        self._tooltips.append(Tooltip(widget, text))
+
+    def _on_help(self) -> None:
+        """Show the quick-start instructions in a modal popup.
+
+        Uses ``showinfo`` -- it grabs focus which is what we want here
+        (the user explicitly pressed ``? Help``); a non-modal balloon
+        would be lost behind the main window on a busy run.
+        """
+        messagebox.showinfo("LyricsFAG \u2014 Quick start", HELP_DIALOG_BODY, parent=self)
+
+    def _popup_done_summary(self, header: str, body: str) -> None:
+        """Surface the run summary in a native popup after the worker ends.
+
+        Triggered from :meth:`_set_summary` only when the run completes
+        on its own (or under user Stop); worker crashes take a
+        separate, louder :func:`messagebox.showerror` path.
+        """
+        # Cancel-pop safety: a ``job_done`` event queued before
+        # ``_on_close`` ran its ``worker.join(timeout=20)`` may still
+        # be sitting in the queue when ``self.destroy()`` fires. Tk
+        # does NOT reliably veto ``messagebox.showinfo(parent=self)``
+        # on a destroyed window on every platform; the safer pattern
+        # is to bail when the window has already gone.
+        try:
+            if not self.winfo_exists():
+                return
+        except Exception:
+            return
+        # Cap to 8 lines + ellipsis so a busy run with a long
+        # per-provider breakdown doesn't generate a 30-line popup.
+        lines = body.splitlines() or [""]
+        if len(lines) > 8:
+            shown = "\n".join(lines[:8]) + "\n... (see log panel for full breakdown)"
+        else:
+            shown = "\n".join(lines)
+        messagebox.showinfo(header, shown or "(empty run)", parent=self)
+
     def _configure_log_tags(self) -> None:
         """Colours by event outcome, level defaults to neutral."""
         base = font.Font(font=self.log_text.cget("font"))
@@ -586,8 +924,8 @@ class LyricsFAGApp(tk.Tk):
         # silently disappear from the GUI log panel.  Mirror the handler
         # onto the package logger so the new pre-flight download
         # WARNINGs (``Whisper: downloading model='base' ...``,
-        # ``Demucs: downloading model='htdemucs' ...``,
-        # ``First run will download ~570 MB total (...)``) actually land
+        # ``Demucs: downloading model='htdemucs_ft' ...``,
+        # ``First run will download ~234 MB total (...)``) actually land
         # in the on-screen log.  Also raise ``lyricsfag_lib``'s level to
         # the user-selected verbosity so ``--verbose`` enables its
         # INFO/DEBUG lines here too (mirrors what
@@ -922,6 +1260,8 @@ class LyricsFAGApp(tk.Tk):
         failed: int,
         elapsed: float,
         by_provider: Counter[str] | None = None,
+        *,
+        finish_kind: str = "job_done",
     ) -> None:
         done_line, breakdown_line = _format_summary_lines(
             elapsed=elapsed,
@@ -939,6 +1279,18 @@ class LyricsFAGApp(tk.Tk):
         self.progress.configure(value=self.progress.cget("maximum"))
         self.start_btn.configure(state="normal")
         self.stop_btn.configure(state="disabled")
+        # Pop a brief native dialog so the user gets a heads-up even when
+        # the log panel is offscreen / minimised. Worker crashes take a
+        # separate ``showerror`` path with the traceback; ``job_empty``
+        # suppresses the popup entirely (a "Done in 0.0s -- written=0"
+        # dialog would just be noise).
+        if finish_kind in {"job_done", "job_stopped"}:
+            header = "LyricsFAG — Stopped" if finish_kind == "job_stopped" \
+                else "LyricsFAG — Done"
+            # ``after_idle`` defers into the Tk event loop so the popup
+            # window isn't dismissed by a stray focus event from the
+            # progress-bar repaint that just ran on the same line.
+            self.after_idle(lambda: self._popup_done_summary(header, text))
 
     def _poll_queue(self) -> None:
         try:
@@ -956,13 +1308,22 @@ class LyricsFAGApp(tk.Tk):
                 elif kind == "device_info":
                     # ("device_info", text, fg_hex)
                     self._set_device_badge(item[1], item[2])
-                elif kind == "job_done":
-                    self._set_summary(*item[1:])
+                elif kind in {"job_done", "job_stopped", "job_empty"}:
+                    # Forward the finish_kind so ``_set_summary`` knows
+                    # which popup header (if any) to display: ``job_empty``
+                    # leaves the popup suppressed, ``job_stopped`` uses
+                    # the Stopped header, ``job_done`` uses Done.
+                    self._set_summary(*item[1:], finish_kind=kind)
                 elif kind == "job_failed":
                     self.status_var.set("Worker crashed.")
                     self.summary_var.set(f"Failed: {item[1]}")
                     self.start_btn.configure(state="normal")
                     self.stop_btn.configure(state="disabled")
+                    self.after_idle(
+                        lambda: messagebox.showerror(
+                            "LyricsFAG \u2014 Worker crashed", item[1], parent=self
+                        )
+                    )
         except queue.Empty:
             pass
         finally:

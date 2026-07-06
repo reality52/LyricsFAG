@@ -30,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lyricsfag_lib.audio import AudioFile, iter_audio_files  # noqa: E402
 from lyricsfag_lib.audio_analysis import (  # noqa: E402
     SUPPORTED_MODELS as _WHISPER_MODELS,
+    describe_models_layout,
     warn_first_run_aggregate,
 )
 from lyricsfag_lib.device import resolve_device  # noqa: E402
@@ -269,7 +270,7 @@ def setup_logging(args: argparse.Namespace, level: Optional[int] = None) -> None
     LOG.setLevel(level)
     # Propagate the requested level to ``lyricsfag_lib`` child loggers so
     # ``--verbose`` actually surfaces their INFO/DEBUG lines (e.g.
-    # ``Demucs: model=htdemucs device=...`` and ``Whisper: loading model=...``
+    # ``Demucs: model=htdemucs_ft device=...`` and ``Whisper: loading model=...``
     # from ``lyricsfag_lib.audio_analysis``).  Each child logger defaults to
     # ``WARNING`` and silently drops INFO records even when the parent root
     # logger is at DEBUG -- we have to override the package level here so
@@ -625,6 +626,25 @@ def _build_audio_analyzer(args: argparse.Namespace):
             "song). For large batches, pass --no-demucs or --device cuda "
             "(requires an NVIDIA GPU)."
         )
+    # Surface the on-disk layout so users can locate their weights
+    # without grepping the source. The whisper repo is ``None`` when we
+    # will fall back to the HuggingFace cache on first use; ``demucs`` is
+    # always concrete but only consumed when its ``.th`` files are
+    # already seeded (otherwise it falls back to ``~/.cache/torch/hub``).
+    _whisper_repo, _demucs_repo = describe_models_layout(
+        audio_model=getattr(args, "audio_model", "base"),
+        audio_model_path=Path(args.audio_model_path).expanduser().resolve()
+        if getattr(args, "audio_model_path", None)
+        else None,
+    )
+    LOG.info(
+        "Audio-analysis weights path layout:\n"
+        "    whisper  -> %s\n"
+        "    demucs   -> %s\n"
+        "(either will be populated on first use; both live under models/ next to the script)",
+        _whisper_repo or "<HuggingFace cache (auto-downloaded on first use)>",
+        _demucs_repo,
+    )
     LOG.info(
         "Local audio-analysis fallback enabled (%s)",
         analyzer.describe(),

@@ -75,12 +75,14 @@ _WHISPER_DOWNLOAD_HINTS_MB: dict[str, int] = {
 }
 
 # Approximate download sizes (in MB) for the Demucs models we ship out
-# of the box.  ``htdemucs`` is a :class:`BagOfModels` of 5 sub-models
-# (each ~84 MB), so the on-disk cache after the first run is ~420 MB.
-# We surface that number to the user up front in
+# of the box.  ``htdemucs_ft`` (the default) is a single fine-tuned
+# model ~84 MB; ``htdemucs`` is the original :class:`BagOfModels` of
+# 5 sub-models (~420 MB on disk after first download). We surface the
+# chosen model's size up front in
 # :meth:`DemucsIsolator._ensure_separator` so the bandwidth cost of
 # enabling Demucs is no longer a surprise.
 _DEMUCS_DOWNLOAD_HINTS_MB: dict[str, int] = {
+    "htdemucs_ft": 84,
     "htdemucs": 420,
 }
 
@@ -91,7 +93,7 @@ def planned_first_run_download(
     audio_model_path: Optional[Path] = None,
     enable_demucs: bool = True,
     demucs_model: Optional[str] = None,
-) -> tuple[bool, bool, int]:
+) -> tuple[bool, bool, int]:  # noqa: D401
     """Plan what ``--use-audio-analysis`` will download on first run.
 
     Returns ``(will_download_whisper, will_download_demucs, total_mb)``
@@ -147,6 +149,16 @@ def warn_first_run_aggregate(
     Skips the WARNING entirely when ``total_mb == 0`` so subsequent
     runs (whose caches are warm) stay quiet.  Returns the same plan
     tuple so callers can branch on it ("did we just announce this?").
+
+    The default Demucs model is :attr:`DemucsIsolator.DEFAULT_MODEL`
+    (``"htdemucs_ft"`` today, ~84 MB) so the standard first-run WARNING
+    string reads roughly::
+
+        First run will download ~234 MB total (whisper-base ~150 MB +
+        htdemucs_ft ~84 MB) from the network. ...
+
+    If a user pins ``--demucs-model htdemucs`` (the legacy 5-sub-model
+    bag, ~420 MB) the breakdown shifts accordingly.
     """
     will_w, will_d, total_mb = planned_first_run_download(
         audio_model=audio_model,
@@ -500,7 +512,15 @@ class DemucsIsolator:
     """
 
     name = "demucs"
-    DEFAULT_MODEL = "htdemucs"
+    # ``htdemucs_ft`` is the Meta-released music-only fine-tune of
+    # ``htdemucs``. Fine-tuning improves vocal isolation quality on dense
+    # mixes and produces noticeably cleaner Whisper output, at the cost
+    # of being a single pretrained run rather than a 5-model bag
+    # (one ~84 MB download vs ~420 MB). The ``htdemucs`` base model is
+    # still selectable via ``DemucsIsolator(model="htdemucs")`` /
+    # ``FasterWhisperAnalyzer(demucs_model="htdemucs")`` for users who
+    # want the larger ensemble.
+    DEFAULT_MODEL = "htdemucs_ft"
 
     def __init__(
         self,
@@ -603,25 +623,36 @@ class DemucsIsolator:
             self._model = get_model(self.model_name)
         else:
             # Pre-flight warning so the user knows the first run will
-            # pull Demucs weights from facebookresearch/demucs.
+            # pull Demucs weights from facebookresearch/demucs. The
+            # model-shape descriptor is data-driven (the default
+            # ``htdemucs_ft`` is a single fine-tuned run; ``htdemucs``
+            # is a :class:`BagOfModels` of 5 sub-models) so we don't
+            # lie about the footprint for users who pinned a non-default.
             _mb = _DEMUCS_DOWNLOAD_HINTS_MB.get(self.model_name)
+            _shape_note = (
+                "BagOfModels of 5 sub-models"
+                if self.model_name == "htdemucs"
+                else "single fine-tuned model"
+                if self.model_name == "htdemucs_ft"
+                else "pretrained run"
+            )
             if _mb is not None:
                 LOG.warning(
                     "Demucs: downloading model='%s' from "
                     "facebookresearch/demucs (~%d MB, approximate; "
-                    "BagOfModels of 5 sub-models) on first use; "
+                    "%s) on first use; "
                     "subsequent runs use the cached weights at "
                     "%s. Pass --no-demucs to skip this heavy "
                     "vocal-isolation pre-stage.",
-                    self.model_name, _mb, _native_cache,
+                    self.model_name, _mb, _shape_note, _native_cache,
                 )
             else:
                 LOG.warning(
-                    "Demucs: downloading model='%s' from "
+                    "Demucs: downloading model='%s' (%s) from "
                     "facebookresearch/demucs on first use; pass "
                     "--no-demucs to skip this heavy vocal-isolation "
                     "pre-stage.",
-                    self.model_name,
+                    self.model_name, _shape_note,
                 )
             self._model = get_model(self.model_name)
         self._model.to(self._resolved_device)
@@ -1222,6 +1253,27 @@ class FakeAnalyzer(AudioAnalyzer):
         return self.canned
 
 
+def describe_models_layout(
+    *,
+    audio_model: str = "base",
+    audio_model_path: Optional[Path] = None,
+) -> tuple[Optional[Path], Path]:
+    """Return ``(whisper_repo_or_none, demucs_repo)`` so callers can announce the path layout.
+
+    ``whisper_repo_or_none`` is ``None`` when neither a user-supplied
+    ``--audio-model-path`` nor a bundled ``models/whisper-base`` exists --
+    in that branch faster-whisper falls back to the HuggingFace cache the
+    first time it sees the model id.
+
+    ``demucs_repo`` is always concrete (it defaults to
+    ``models/demucs/`` next to the script even when empty), but
+    demucs's :class:`LocalRepo` only honours it when ``models/demucs/``
+    already contains ``.th`` files (otherwise it falls back to the
+    native torch hub cache at ``~/.cache/torch/hub/checkpoints``).
+    """
+    return _resolve_model_path(audio_model, audio_model_path), _resolve_demucs_repo()
+
+
 __all__: Iterable[str] = (
     "AnalyzerSegment",
     "AudioAnalyzer",
@@ -1231,6 +1283,7 @@ __all__: Iterable[str] = (
     "FasterWhisperAnalyzer",
     "SUPPORTED_MODELS",
     "WHISPER_SR",
+    "describe_models_layout",
     "planned_first_run_download",
     "warn_first_run_aggregate",
 )
