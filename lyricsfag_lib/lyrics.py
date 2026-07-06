@@ -411,6 +411,7 @@ class LyricsFetcher:
     # Note this is a filename check, not a title check (the title-based
     # short-circuit in :meth:`_looks_instrumental` is unrelated and stays).
     _INSTRUMENTAL_FILENAME_PATTERNS: tuple[str, ...] = (
+        # English patterns (existed since v1.1.0).
         "backing track",
         "inst version",
         "instrumental",
@@ -422,6 +423,24 @@ class LyricsFetcher:
         "off vocal",
         "vocal removed",
         "vocals removed",
+        # Explicit hyphen variant. Redundant with "no vocal" after
+        # the whitespace/hyphen normalisation, but kept per user
+        # request for grep-ability.
+        "no-vocal",
+        # SEMANTIC NOTE: "acapella" / "акапелла" literally mean
+        # "vocal-only, no instruments" -- the OPPOSITE of instrumental.
+        # Whisper CAN transcribe these (there are vocals to transcribe).
+        # Added per user request; remove these two entries if skipping
+        # Whisper on a cappella files turns out to be undesirable.
+        "acapella",
+        "акапелла",
+        # Russian equivalents of the English patterns above. The same
+        # normalisation (CamelCase split + whitespace/punctuation
+        # collapse) catches the usual variants.
+        "инструментал",
+        "караоке",
+        "минусовка",
+        "без вокала",
     )
     # Compiled once: a single anchored substring search is cheaper than 11
     # separate ``in`` checks on every audio file in a 300-track batch. The
@@ -430,9 +449,9 @@ class LyricsFetcher:
     # doesn't trigger ``"instrumental"``, and ``"tracklist"`` doesn't trigger
     # ``"backing track"``.
     _INSTRUMENTAL_FILENAME_RE = re.compile(
-        r"(?:^|[\s\-_.])("
+        r"\b("
         + "|".join(re.escape(p) for p in _INSTRUMENTAL_FILENAME_PATTERNS)
-        + r")(?:$|[\s\-_.])",
+        + r")\b",
         re.IGNORECASE,
     )
 
@@ -440,15 +459,43 @@ class LyricsFetcher:
     def _filename_blocks_audio(audio: AudioFile) -> bool:
         """True if ``audio.path`` looks like an instrumental/karaoke version.
 
-        Normalises the stem (lowercase, collapses ``-`` / ``_`` / ``.`` /
-        ``\\`` and runs of whitespace into a single space) so
-        ``"Song-Off-Vocal.flac"``, ``"song_off_vocal.flac"`` and
-        ``"song off vocal.flac"`` all match the same pattern. Used to
-        short-circuit the audio-analysis branch in :meth:`fetch`; the
-        LRCLIB / Genius branches are untouched so a karaoke file whose
-        original has real lyrics still gets an LRC.
+        Normalises the stem in TWO steps so the usual variants all match
+        the same pattern:
+
+        1. **CamelCase split** -- inserts a space at every
+           lowercase-uppercase boundary (``offVocal`` -> ``off Vocal``,
+           ``SongOffVocal`` -> ``Song Off Vocal``). This MUST run before
+           lowercasing, because lowercasing first would lose the
+           boundary positions.
+        2. **Whitespace / punctuation collapse + lowercase** -- collapses
+           any run of whitespace / ``-`` / ``_`` / ``.`` / ``\\`` to a
+           single space, then lowercases. So ``"Song-Off-Vocal.flac"``,
+           ``"song_off_vocal.flac"`` and ``"song off vocal.flac"`` all
+           normalise to ``"song off vocal"`` and match the existing
+           ``"off vocal"`` pattern.
+
+        Used to short-circuit the audio-analysis branch in :meth:`fetch`;
+        the LRCLIB / Genius branches are untouched so a karaoke file
+        whose original has real lyrics still gets an LRC.
         """
-        name = re.sub(r"[\s\-_.]+", " ", audio.path.stem.lower()).strip()
+        # Unicode-aware CamelCase split: matches at every
+        # lowercase-then-uppercase boundary for BOTH ASCII and
+        # Cyrillic. The Cyrillic ranges are U+0430–U+044F (lowercase)
+        # and U+0410–U+042F (uppercase), which covers standard
+        # Russian filenames like ``ПесняИнструментал``. Without
+        # these ranges, the Cyrillic boundary is invisible to the
+        # ASCII-only ``[a-z][A-Z]`` pattern, and ``ПесняИнструментал``
+        # never gets split -- so the new ``инструментал`` pattern
+        # can't match (the ASCII-only ``[\s\-_.]`` boundary in the
+        # compiled regex would see a Cyrillic letter, not a boundary,
+        # at the position between ``я`` and ``и``).
+        stem_with_camelcase_spaces = re.sub(
+            r"([a-z\u0430-\u044f])([A-Z\u0410-\u042f])", r"\1 \2",
+            audio.path.stem,
+        )
+        name = re.sub(
+            r"[\s\-_.]+", " ", stem_with_camelcase_spaces.lower()
+        ).strip()
         return bool(LyricsFetcher._INSTRUMENTAL_FILENAME_RE.search(name))
 
     def fetch(self, audio: AudioFile) -> LyricsResult | LyricsFailure:
