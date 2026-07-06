@@ -4,6 +4,15 @@
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
+> **AI-assisted project.** This codebase was written with substantial help
+> from an AI coding assistant ([Codebuff](https://codebuff.com), model
+> `minimax/minimax-m3`) under human direction and review. The code has
+> been tested but not certified — running LyricsFAG against your music
+> library (network calls to LRCLIB / Genius, Whisper / Demucs weight
+> downloads, writes to `.lrc` files next to your audio) is **at your own
+> risk**. Try it on a copy of your library first before trusting it with
+> a real one.
+
 A small, dependency-light command-line tool that walks a music library,
 reads audio tags, and writes matching `.lrc` files next to each track.
 
