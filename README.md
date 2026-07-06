@@ -6,6 +6,8 @@ reads audio tags, and writes matching `.lrc` files next to each track.
 It pulls [LRC] data from **[LRCLIB.net]** (free, no auth, returns synced
 lyrics whenever possible) and falls back to **[Genius]** (huge database,
 plain text) when LRCLIB has nothing or you supply a Genius token.
+If it cant find lyrics in those sources it will try to generate new .lrc file with the help of demucs and whisper. 
+It can do it either with cuda capable GPU or just with CPU (significally slower)
 
 Supports the following audio formats (anything `mutagen` can read):
 `FLAC`, `MP3`, `M4A/MP4`, `AAC`, `OGG`, `OPUS`, `WMA`, `WAV`, `APE`, `WV`,
