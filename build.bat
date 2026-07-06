@@ -63,10 +63,13 @@ REM builds we leave the other variant's outputs alone so the user
 REM can build one variant at a time without nuking the other --
 REM a destructive single-target cleanup was the behaviour the
 REM v1.1.3 reviewer flagged.
-if /i "%TARGET%"=="all" (
-    if exist build rmdir /s /q build
-    if exist dist  rmdir /s /q dist
-)
+REM Two single-line compound-if statements (no parenthesized block)
+REM for maximum batch-parser compatibility -- the previous parenthesized
+REM form triggered . was unexpected at this time on some Windows
+REM versions.  Semantics are identical: clean dist\ + build\ only when
+REM TARGET=all.
+if /i "%TARGET%"=="all" if exist build rmdir /s /q build
+if /i "%TARGET%"=="all" if exist dist  rmdir /s /q dist
 
 REM Order matters: portable first (longer), then lite. Both write to the
 REM SAME dist\ directory but with distinct names so the four .exe files

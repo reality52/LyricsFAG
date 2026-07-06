@@ -420,9 +420,18 @@ class LyricsFetcher:
         "minus one",
         "no vocal",
         "no vocals",
-        "off vocal",
+        "off vocal",        
         "vocal removed",
         "vocals removed",
+        # No-separator / CamelCase variants. The CamelCase split in
+        # _filename_blocks_audio (inserts a space at lowercase-uppercase
+        # boundaries BEFORE lowercasing) already makes "SongOffVocal"
+        # match the existing "off vocal" pattern. These dedicated
+        # no-space entries are belt-and-suspenders for all-lowercase
+        # filenames like "songoffvocal" where the CamelCase split
+        # doesn't fire.
+        "offvocal",
+        "novocal",
         # Explicit hyphen variant. Redundant with "no vocal" after
         # the whitespace/hyphen normalisation, but kept per user
         # request for grep-ability.
@@ -449,9 +458,9 @@ class LyricsFetcher:
     # doesn't trigger ``"instrumental"``, and ``"tracklist"`` doesn't trigger
     # ``"backing track"``.
     _INSTRUMENTAL_FILENAME_RE = re.compile(
-        r"\b("
+        r"(?:^|[\s\-_.])("
         + "|".join(re.escape(p) for p in _INSTRUMENTAL_FILENAME_PATTERNS)
-        + r")\b",
+        + r")(?:$|[\s\-_.])",
         re.IGNORECASE,
     )
 

@@ -56,6 +56,21 @@ from .lrc import format_timestamp_ms
 
 LOG = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# PyTorch 2.6 / demucs 4.0.1 ``weights_only`` compatibility
+# ---------------------------------------------------------------------------
+#
+# The actual monkey-patch lives in the package-internal
+# :mod:`lyricsfag_lib._torch_compat` so :mod:`scripts.download_demucs_model`
+# and this module share one implementation.  See that module\'s
+# docstring for the full rationale (PyTorch 2.6 changed
+# ``torch.load``\'s ``weights_only`` default to ``True``; demucs 4.0.1
+# pickles ``HTDemucs`` / ``fractions.Fraction`` / ... that the strict
+# unpickler rejects; we disable ``weights_only`` for ``.th`` files only
+# to keep the safe default for other ``torch.load`` callers).
+from ._torch_compat import ensure_torch_load_patched
+
+
 # Recognised Whisper model ids (passed to ``WhisperModel(model_size_or_path=...)``).
 SUPPORTED_MODELS: tuple[str, ...] = ("tiny", "base", "small", "medium", "large-v3")
 
@@ -75,15 +90,18 @@ _WHISPER_DOWNLOAD_HINTS_MB: dict[str, int] = {
 }
 
 # Approximate download sizes (in MB) for the Demucs models we ship out
-# of the box.  ``htdemucs_ft`` (the default) is a single fine-tuned
-# model ~84 MB; ``htdemucs`` is the original :class:`BagOfModels` of
-# 5 sub-models (~420 MB on disk after first download). We surface the
-# chosen model's size up front in
-# :meth:`DemucsIsolator._ensure_separator` so the bandwidth cost of
-# enabling Demucs is no longer a surprise.
+# of the box.  ``htdemucs_ft`` (the default) is a
+# :class:`demucs.pretrained.BagOfModels` of 4 sub-models
+# (4 x ~84 MB = ~336 MB on disk after first download);
+# ``htdemucs`` is a single pretrained HTDemucs (~84 MB).  The
+# numbers are intentionally approximate (the WARNING surfaces them
+# as ``~N MB``) so the user gets a realistic ballpark without us
+# pinning per-release byte counts.  We surface the chosen model's
+# size up front in :meth:`DemucsIsolator._ensure_separator` so the
+# bandwidth cost of enabling Demucs is no longer a surprise.
 _DEMUCS_DOWNLOAD_HINTS_MB: dict[str, int] = {
-    "htdemucs_ft": 84,
-    "htdemucs": 420,
+    "htdemucs_ft": 336,
+    "htdemucs": 84,
 }
 
 
@@ -597,6 +615,13 @@ class DemucsIsolator:
             raise RuntimeError(missing_audio_hint("demucs"))
         from demucs.pretrained import get_model
 
+        # PyTorch 2.6 / demucs 4.0.1 ``weights_only`` workaround --
+        # shared implementation lives in :mod:`lyricsfag_lib._torch_compat`
+        # so the script and the library can\'t drift.  The confirmation
+        # log line fires on first application, which is useful for
+        # confirming the patch is actually in effect.
+        ensure_torch_load_patched()
+
         self._resolved_device = resolve_device(self.device_pref)
         # We never pass ``repo=`` here because :class:`demucs.pretrained.LocalRepo`
         # requires an ALREADY-POPULATED directory of model metadata files (e.g.
@@ -647,7 +672,13 @@ class DemucsIsolator:
                 "no download required (%d weight file(s)).",
                 self.model_name, bundled_repo_path, len(_bundled_weights),
             )
-            self._model = get_model(self.model_name, repo=str(bundled_repo_path))
+            # NOTE: ``repo=`` expects a :class:`pathlib.Path` (or any
+            # :class:`os.PathLike`), NOT a ``str`` -- demucs 4.0.1's
+            # :class:`LocalRepo` calls ``repo.is_dir()`` on the value
+            # we pass and ``str.is_dir`` does not exist.  See the
+            # :func:`scripts.download_demucs_model.verify_layout` docstring
+            # for the same trap on the script side.
+            self._model = get_model(self.model_name, repo=bundled_repo_path)
         elif _cache_has_weights:
             LOG.info(
                 "Demucs: loading model='%s' from local cache at %s; "

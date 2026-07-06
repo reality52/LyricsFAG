@@ -2,158 +2,127 @@
 """Download a demucs pretrained-model tree so ``models/demucs/`` becomes
 loadable by :class:`demucs.pretrained.LocalRepo`.
 
-This is the "Path B" workflow described in ``models/demucs/README.md`` and the
-missing piece that turns ``models/demucs/`` from a "currently empty by design"
-placeholder into a real, ready-to-bundle seed for a fully offline
+This is the "Path B" workflow described in ``models/demucs/README.md`` and
+the missing piece that turns ``models/demucs/`` from a "currently empty by
+design" placeholder into a real, ready-to-bundle seed for a fully offline
 ``LyricsFAG-Portable.exe``.
 
-Why this script exists
-----------------------
-Demucs 4.x's auto-download path stores files in PyTorch Hub's native cache
-(``~/.cache/torch/hub/checkpoints/<hash>-<hash>.th``), but its
-:class:`demucs.pretrained.LocalRepo` -- the only thing that respects a
-``repo=`` argument to :func:`demucs.pretrained.get_model` -- looks for
-``<model_name>.th`` (no hash).  Without a translation step the cache and the
-bundled layout are incompatible (``ModelLoadingError: htdemucs is neither a
-single pre-trained model or a bag of models``), which we verified
-empirically on 2026-07-06 when "Path A" (manual copy) was REFUTED.
+Why this script was rewritten
+-----------------------------
+Demucs 4.0.1's bundled ``files.txt`` (the master listing of every weight
+file demucs knows about) no longer carries model-name prefixes: every
+entry is a bare ``<hash>-<hash>.<ext>`` (e.g. ``955717e8-8726e21a.th``).
+The mapping from model name (``htdemucs_ft``, ``htdemucs``, ``mdx_q``,
+...) to the set of weight files it needs lives in the YAML descriptors
+under ``demucs.pretrained.REMOTE_ROOT`` (``htdemucs_ft.yaml`` etc.).
 
-The two established demucs endpoints we rely on:
+The previous version of this script tried to filter ``files.txt`` by
+``--model htdemucs_ft`` and parse ``<sig>-<hash>.<ext>`` lines, but no
+``sig`` equals a model name in 4.0.1 -- every ``sig`` is also a hash.
+That meant the filter always returned zero files and the script
+aborted with ``no files.txt lines matched the --model 'htdemucs_ft'
+select; aborting`` (confirmed empirically on 2026-07-06).
 
-* :data:`demucs.pretrained.REMOTE_ROOT` -- the directory bundled inside the
-  installed ``demucs`` package that holds ``files.txt`` (the canonical
-  master listing of every weight file demucs knows about).
-* :data:`demucs.pretrained.ROOT_URL` -- typically
-  ``https://dl.fbaipublicfiles.com/demucs/``.
+The new flow sidesteps ``files.txt`` entirely:
 
-Each line in ``files.txt`` has the form ``<sig>-<hash>.<ext>`` (e.g.
-``htdemucs-f7e0c4bc.th``) and is fetched verbatim as ``<ROOT_URL><line>``.
-We translate that to ``<sig>.<ext>`` on disk -- the bare shape
-:class:`LocalRepo` reads.
+  1. Call :func:`demucs.pretrained.get_model(<model_name>)` (no
+     ``repo=``).  Demucs 4.x uses its native torch-hub cache
+     (``~/.cache/torch/hub/checkpoints/``) and auto-downloads missing
+     weights with proper hash validation; if the cache is already
+     warm, this is a no-op.
+  2. Read the YAML descriptor for the model from the cache (demucs
+     itself copies it there alongside the weights).
+  3. Parse the YAML to discover the list of ``<hash>`` sub-model
+     names the model needs.
+  4. Copy the YAML + the matching ``<hash>-<hash>.th`` files from
+     the cache to ``models/demucs/`` in the layout
+     :class:`demucs.pretrained.LocalRepo` reads directly.
+
+``htdemucs_ft`` is a :class:`BagOfModels` of 4 sub-models, so the
+seeding step copies 1 YAML + 4 ``.th`` files (~336 MB).  ``htdemucs``
+is a single HTDemucs (1 YAML + 1 ``.th`` file, ~84 MB).
 
 Usage
 -----
-Mirror all demucs files into ``models/demucs/`` (default)::
+Seed the default ``htdemucs_ft`` into ``models/demucs/`` and verify
+the result in one shot::
 
-    python scripts/download_demucs_model.py
+    python scripts/download_demucs_model.py --verify
 
-Filter to the ``htdemucs`` model only (smaller, default for LyricsFAG)::
-
-    python scripts/download_demucs_model.py --model htdemucs
-
-Verify the resulting directory works with ``get_model(..., repo=...)``::
+Seed the legacy ``htdemucs`` (single sub-model, ~84 MB) instead::
 
     python scripts/download_demucs_model.py --model htdemucs --verify
 
-The mirror default (``https://dl.fbaipublicfiles.com/demucs/``) is the
-canonical endpoint because the file sizes are large (~84 MB each) and the
-firewall / DPI appliances that block the HuggingFace LFS CDN don't
-typically interfere with this one; if you DO hit a wall, use
-``--url <mirror>`` to point at a known-good mirror.
+List what would be copied without actually copying::
+
+    python scripts/download_demucs_model.py --list-only
+
+Note: ``--list-only`` still triggers demucs's auto-download if the
+cache is cold (the script needs to inspect the cache to build the
+listing).  Use ``--model htdemucs`` to download only the smaller
+single-file variant; the previous assumption that ``htdemucs`` was a
+5-sub-model ~420 MB bag no longer holds in demucs 4.0.1 (its YAML
+says ``models: ['955717e8']`` -- a single 84 MB file).
 """
 
 from __future__ import annotations
 
 import argparse
-import re
+import shutil
 import sys
-import time
-import urllib.error
-import urllib.request
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Optional
 
-# Match "<sig>-<hash>.<ext>" so that future releases using hyphens inside
-# the sig (e.g. "htdemucs-ft-abcd1234.th" or "htdemucs_ft-abcd1234.th")
-# still parse correctly. The anchor on the trailing hash+ext is what gives
-# us certainty: the hash must be 6-12 lowercase hex chars, and the
-# extension must start with a literal "." followed by alphanumerics --
-# this combination is what demucs uses today and would have to change
-# substantively for this regex to misfire.
-#
-# The sig itself is captured non-greedily (".+?") so multi-hyphen sigs
-# truncate at the *last* matching "-<hash>." boundary. By way of
-# counter-example, the older stricter pattern ``[^-/.\s]+`` rejected any
-# hyphens in the sig -- safe today (htdemucs, htdemucs_ft, ...) but
-# fragile for forward compatibility.
-_F_LINE = re.compile(r"^(?P<sig>.+?)-(?P<hash>[0-9a-f]{6,12})(?P<ext>\.[A-Za-z0-9]+)$")
+# Make the ``lyricsfag_lib`` package importable when this script is run
+# directly, e.g. ``python scripts/download_demucs_model.py --verify``.
+# Python only puts the *script\'s* directory (``scripts/``) on
+# ``sys.path[0]``; the project root (where ``lyricsfag_lib/`` lives) is
+# not on the path unless we add it explicitly.  Idempotent and free of
+# effect under ``python -m scripts.download_demucs_model`` (where
+# ``scripts/`` is already a package on the path) and under the PyInstaller
+# bundled ``.exe`` (where PyInstaller populates the frozen module table
+# ahead of ``sys.path``).
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
 DEFAULT_OUTPUT_DIR = "models/demucs"
-# ``htdemucs_ft`` is the music-only fine-tune of ``htdemucs`` --
-# LyricsFAG now defaults to it for vocal isolation (single ~84 MB
-# download vs htdemucs's 5-sub-model bag at ~420 MB). ``htdemucs``
-# remains selectable via ``--model htdemucs`` for users who want the
-# base ensemble.
+# ``htdemucs_ft`` is the Meta-released music-only fine-tune of
+# ``htdemucs``.  LyricsFAG now defaults to it for vocal isolation
+# (4-sub-model BagOfModels, ~336 MB on disk).  ``htdemucs`` itself is
+# a single HTDemucs (~84 MB) and remains selectable via
+# ``--model htdemucs`` for users who want the smaller footprint.
 DEFAULT_MODEL = "htdemucs_ft"
-DEFAULT_URL = "https://dl.fbaipublicfiles.com/demucs/"
 
-CHUNK_BYTES = 64 * 1024
-HTTP_TIMEOUT = 120
-MAX_RETRIES = 6
-RETRY_BACKOFF_S = 2.0
-USER_AGENT = "lyricsfag-downloader/1.0 (demucs)"
-
-# Aggressive check: a populated `models/demucs/` for htdemucs is ~5 weight
-# files of ~84 MB each, so anything below this is either partial / corrupt
-# or mirroring the wrong directory. Used for a soft warning only -- the
-# script still succeeds if the user explicitly wants a smaller build.
-MIN_HTDEMUCS_BYTES = 5 * 70 * 1024 * 1024  # 350 MB slack (5 * 70 MB)
-
-# Module-level probe cache. ``None`` means "not yet attempted"; ``True`` /
-# ``False`` record the actual outcome. We keep this state at module scope
-# rather than inside the function so the import cost is paid at most once
-# per process and so unit tests can poke it without monkey-patching.
+# Module-level probe cache for the demucs import.  ``None`` means "not
+# yet attempted"; ``True`` / ``False`` record the actual outcome.  Kept
+# at module scope so the import cost is paid at most once per process.
 _DEMUCS_OK: Optional[bool] = None
 
-
-# -----------------------------------------------------------------------------
-# Networking helpers (mirror scripts/download_whisper_model.py style)
-# -----------------------------------------------------------------------------
-
-
-def _open(url: str, *, method: str = "GET", extra_headers: Optional[dict] = None):
-    headers = {"User-Agent": USER_AGENT}
-    if extra_headers:
-        headers.update(extra_headers)
-    req = urllib.request.Request(url, method=method, headers=headers)
-    return urllib.request.urlopen(req, timeout=HTTP_TIMEOUT)
-
-
-def remote_file_size(url: str) -> Optional[int]:
-    """Return Content-Length of the URL (HEAD), or None if unavailable."""
-    try:
-        with _open(url, method="HEAD") as r:
-            cl = r.headers.get("Content-Length")
-            return int(cl) if cl and cl.isdigit() else None
-    except urllib.error.HTTPError as exc:
-        if exc.code == 405:
-            return None
-        raise
-
-
-def supports_partial_content(url: str) -> bool:
-    try:
-        with _open(url, extra_headers={"Range": "bytes=0-0"}) as r:
-            return r.status == 206
-    except urllib.error.HTTPError as exc:
-        if exc.code == 416:
-            return True
-        return False
-    except Exception:
-        return False
+# ---------------------------------------------------------------------------
+# PyTorch 2.6 / demucs 4.0.1 ``weights_only`` compatibility
+# ---------------------------------------------------------------------------
+#
+# The actual monkey-patch lives in the package-internal
+# :mod:`lyricsfag_lib._torch_compat` so :mod:`lyricsfag_lib.audio_analysis`
+# and this script share one implementation.  We pass
+# ``echo_to_stderr=True`` so the confirmation line is visible without any
+# logging configuration -- a user running this CLI directly
+# (``python scripts/download_demucs_model.py --verify``) should see the
+# line on stderr regardless of the root logger level.
+from lyricsfag_lib._torch_compat import ensure_torch_load_patched
 
 
 # -----------------------------------------------------------------------------
-# Demucs metadata discovery
+# Demucs presence + cache helpers
 # -----------------------------------------------------------------------------
 
 
 def _ensure_demucs() -> bool:
     """Whether the demucs 4.x package can be imported.
 
-    Result is cached in module-level ``_DEMUCS_OK`` so a hot path
-    (e.g. ``main()`` checking it under ``--verify``) can short-circuit
-    the ~3 s ``import torch`` cost demucs pulls in.
+    Result is cached in module-level ``_DEMUCS_OK`` so a hot path can
+    short-circuit the ~3 s ``import torch`` cost demucs pulls in.
     """
     global _DEMUCS_OK
     if _DEMUCS_OK is None:
@@ -165,69 +134,101 @@ def _ensure_demucs() -> bool:
     return bool(_DEMUCS_OK)
 
 
-def _demucs_paths():
-    """Return ``(files_txt_path, root_url)`` from the installed demucs."""
-    import demucs.pretrained as dp  # only entered when --verify/--list is used
-    return Path(dp.REMOTE_ROOT) / "files.txt", dp.ROOT_URL
+def _native_demucs_cache_dir() -> Path:
+    """Directory where demucs 4.x's :class:`RemoteRepo` deposits weights.
 
-
-def list_repo_lines(files_txt: Path) -> list[str]:
-    """Return the non-comment, non-blank lines of ``files.txt``.
-
-    demucs 4.0.1's ``_parse_remote_files`` deliberately ignores comment /
-    blank lines; we mirror that behaviour here so the listing we work on
-    is the SAME set of lines demucs itself would consume.
+    Demucs resolves its download destination via ``torch.hub.get_dir()``,
+    which on Windows resolves to
+    ``%USERPROFILE%\\.cache\\torch\\hub\\checkpoints``.  We surface the
+    same path here so the cache-relocation step below copies from the
+    directory demucs itself just wrote to.
     """
-    if not files_txt.exists():
-        raise FileNotFoundError(
-            f"demucs files.txt not found at {files_txt}; "
-            "is the `demucs` package correctly installed? "
-            "(pip install demucs)"
-        )
-    out: list[str] = []
-    for raw in files_txt.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        out.append(line)
-    return out
+    return Path.home() / ".cache" / "torch" / "hub" / "checkpoints"
 
 
-def select_lines(
-    all_lines: Iterable[str], *, model: Optional[str]
-) -> list[tuple[str, str, str, str]]:
-    """Return ``[(line, sig, hash, ext), ...]`` for the lines we want.
+def _ensure_model_in_cache(model_name: str) -> Path:
+    """Trigger demucs's native auto-download so the model lands in the
+    torch hub cache, then return the path to the YAML descriptor there.
 
-    ``line`` is the original ``files.txt`` entry (used for the download
-    URL), the rest is its parsed components.
+    Demucs also copies the model's ``<name>.yaml`` descriptor into the
+    cache alongside the weights; that's the file
+    :class:`demucs.pretrained.LocalRepo` reads to reconstruct the model
+    on a subsequent ``get_model(name, repo=output_dir)`` call.
 
-    When ``model`` is set (e.g. ``"htdemucs"``) the filter keeps only
-    lines whose signature exactly matches ``model`` OR starts with
-    ``<model>_`` -- so ``htdemucs`` keeps the 5 htdemucs weight files
-    but drops unrelated models like ``mdx_q``. The ``_<suffix>``
-    allowance keeps future sibling models (e.g. ``htdemucs_ft``) in the
-    selection if a user asks for the parent name.
-    Without ``model`` we keep *everything*: useful for a "max-portable"
-    build, wasteful if you only use htdemucs.
+    Edge case
+    ---------
+    If the ``.th`` weights are already in the cache from a prior run
+    (so demucs's :class:`RemoteRepo` doesn't trigger a fresh download
+    and the YAML-copy step is skipped), the ``.yaml`` might be missing
+    from the cache.  In that case we fall back to the descriptor
+    bundled in the installed ``demucs/remote/`` directory and copy it
+    in ourselves so :class:`LocalRepo` has a uniform source-of-truth
+    layout to read from on the next call.  Observed empirically on
+    2026-07-06 for ``htdemucs`` (single HTDemucs) when its ``.th``
+    was pre-populated by a Path A attempt and ``htdemucs.yaml`` was
+    not in the cache afterwards.
     """
-    out: list[tuple[str, str, str, str]] = []
-    for line in all_lines:
-        m = _F_LINE.match(line)
-        if not m:
-            print(
-                f"  [skip] {line!r} does not match the <sig>-<hash>.<ext> pattern",
-                file=sys.stderr,
+    from demucs.pretrained import get_model
+
+    # Idempotent: if the weights are already in the cache, this is a no-op
+    # (well, a re-load into memory + discarding the model object).
+    get_model(model_name)
+    cache = _native_demucs_cache_dir()
+    ypath = cache / f"{model_name}.yaml"
+    if not ypath.exists():
+        # Demucs didn't deposit the .yaml in the cache (typically because
+        # the .th was already there and no download fired).  Pull the
+        # descriptor from the installed demucs package and copy it in.
+        import demucs.pretrained as dp
+
+        bundled = Path(dp.REMOTE_ROOT) / f"{model_name}.yaml"
+        if not bundled.exists():
+            raise RuntimeError(
+                f"YAML descriptor for {model_name!r} not found in the "
+                f"torch hub cache ({ypath}) nor in the installed demucs "
+                f"package ({bundled}). The model name may be wrong, or "
+                f"the installed demucs is too old to know about "
+                f"{model_name!r}."
             )
-            continue
-        sig, hsh, ext = m["sig"], m["hash"], m["ext"]
-        if model and not (sig == model or sig.startswith(model + "_")):
-            continue
-        out.append((line, sig, hsh, ext))
-    return out
+        cache.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(bundled, ypath)
+    return ypath
+
+
+def _needed_th_files(yaml_path: Path) -> list[str]:
+    """Parse a demucs YAML descriptor and return the list of ``<hash>``
+    sub-model names the model needs.
+
+    For a single HTDemucs the YAML is minimal::
+
+        models: ['955717e8']
+
+    For a BagOfModels like ``htdemucs_ft`` it's::
+
+        models: ['f7e0c4bc', 'd12395a8', '92cfc3b6', '04573f0d']
+        weights: [[1.,0.,0.,0.], ...]
+
+    Either way, each entry is the ``<hash>`` prefix of one of the
+    ``<hash>-<hash>.th`` files in the cache.  ``weights`` is a
+    combination matrix and is only relevant at inference time (when
+    the BagOfModels averages the sub-models' outputs) -- we don't
+    need to do anything with it during seeding.
+    """
+    import yaml
+
+    data = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
+    models = data.get("models") if isinstance(data, dict) else None
+    if not models:
+        raise RuntimeError(
+            f"YAML at {yaml_path} has no 'models:' field; cannot "
+            f"determine which .th files to seed. Inspect the file "
+            f"manually -- demucs may have changed its descriptor format."
+        )
+    return [str(m) for m in models]
 
 
 # -----------------------------------------------------------------------------
-# Download one file with Range-aware resume
+# Seed (cache -> models/demucs/)
 # -----------------------------------------------------------------------------
 
 
@@ -239,147 +240,107 @@ def _format_bytes(n: float) -> str:
     return f"{n:6.1f} TB"
 
 
-def _progress(label: str, done: int, total: Optional[int], t0: float, show: bool) -> None:
-    if not show:
-        return
-    pct = ""
-    if total and total > 0:
-        pct = f"{(done / total) * 100:5.1f}%"
-    speed = _format_bytes(done / max(time.monotonic() - t0, 0.001)) + "/s"
-    msg = f"  {label:30s} {_format_bytes(done):>14s}"
-    if total:
-        msg += f" / {_format_bytes(total):>14s}  {pct}"
-    msg += f"  {speed}"
-    sys.stdout.write("\r" + msg + " " * 4)
-    sys.stdout.flush()
+def _find_th_for_hash(cache: Path, hash_name: str) -> list[Path]:
+    """Return the non-partial ``<hash>-<hash>.th`` files in the cache.
+
+    Filters out zero-byte ``.partial`` files (stale leftovers from
+    interrupted downloads) so a half-finished transfer doesn't shadow
+    a complete one.  Returns a list (not a single Path) because future
+    demucs releases could publish multiple variants of the same hash.
+    """
+    matches = sorted(
+        m for m in cache.glob(f"{hash_name}-*.th") if m.stat().st_size > 0
+    )
+    return matches
 
 
-def download_file(
-    url: str,
-    dest: Path,
+def _seed_models_dir(
+    model_name: str,
+    output_dir: Path,
     *,
     force: bool = False,
     quiet: bool = False,
-    retries: int = MAX_RETRIES,
-) -> bool:
-    """Stream-download ``url`` to ``dest``, with Range-aware resume.
+) -> list[Path]:
+    """Copy the YAML descriptor + the needed ``<hash>.th`` files from
+    the torch hub cache to ``output_dir`` so
+    ``get_model(model_name, repo=output_dir)`` works offline.
 
-    Mirrors :func:`scripts.download_whisper_model.download_file` so the
-    two scripts behave consistently under flaky connections / TCP-RST
-    mid-stream drops. Returns True if the file is complete, False after
-    exhausting retries.
+    Returns the list of files written (or already present and
+    up-to-date).  Raises :class:`RuntimeError` if the cache doesn't
+    contain the files the YAML references -- that means
+    :func:`_ensure_model_in_cache` failed silently or demucs changed
+    its cache convention.
     """
-    try:
-        expected_size = remote_file_size(url)
-    except Exception as exc:
+    ypath = _ensure_model_in_cache(model_name)
+    cache = _native_demucs_cache_dir()
+    output_dir = Path(output_dir).resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    written: list[Path] = []
+
+    # 1. Copy the YAML descriptor (one per model).
+    dest_yaml = output_dir / ypath.name
+    src_size = ypath.stat().st_size
+    if force or not dest_yaml.exists() or dest_yaml.stat().st_size != src_size:
         if not quiet:
-            print(f"  [HEAD] {url} -> {type(exc).__name__}: {exc}")
-        expected_size = None
+            print(f"  [copy] {ypath.name} ({_format_bytes(src_size)})")
+        shutil.copy2(ypath, dest_yaml)
+    written.append(dest_yaml)
 
-    if not force and dest.exists() and expected_size is not None:
-        if dest.stat().st_size == expected_size:
-            if not quiet:
-                print(
-                    f"  [skip] {dest.name} already complete "
-                    f"({_format_bytes(expected_size)})"
-                )
-            return True
-
-    range_supported = supports_partial_content(url) if expected_size else False
-
-    last_exc: Optional[Exception] = None
-    for attempt in range(1, retries + 1):
-        resume_from = dest.stat().st_size if dest.exists() else 0
-        if resume_from > 0 and not range_supported:
-            if not quiet:
-                print(
-                    f"  [info] {dest.name}: server doesn't return 206 for "
-                    "Range request -- restarting from byte 0."
-                )
-            dest.write_bytes(b"")
-            resume_from = 0
-        if (
-            expected_size is not None
-            and resume_from > expected_size
-            and not force
-        ):
-            if not quiet:
-                print(f"  [info] {dest.name}: local size > expected -- truncating")
-            dest.write_bytes(b"")
-            resume_from = 0
-
-        extra_headers: dict[str, str] = {}
-        append_mode = False
-        if (
-            resume_from > 0
-            and range_supported
-            and expected_size is not None
-            and resume_from < expected_size
-        ):
-            extra_headers["Range"] = f"bytes={resume_from}-"
-            append_mode = True
-
-        try:
-            t0 = time.monotonic()
-            done = resume_from
-            with _open(url, extra_headers=extra_headers) as r, dest.open(
-                "ab" if append_mode else "wb"
-            ) as f:
-                while True:
-                    chunk = r.read(CHUNK_BYTES)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    done += len(chunk)
-                    _progress(dest.name, done, expected_size, t0, not quiet)
-                f.flush()
-            if not quiet:
-                sys.stdout.write("\n")
-
-            actual = dest.stat().st_size
-            if expected_size is not None and actual != expected_size:
-                raise RuntimeError(
-                    f"size mismatch: got {actual}, expected {expected_size}; "
-                    "server probably RST'd mid-write; will resume on next retry"
-                )
-            return True
-        except Exception as exc:
-            last_exc = exc
-            if attempt == retries:
+    # 2. Copy each <hash>.th file the YAML references.  The YAML's
+    #    `models:` list is the authoritative list -- we never copy
+    #    extra files the YAML didn't ask for, so the seeded directory
+    #    is exactly what LocalRepo needs and nothing more.
+    needed = _needed_th_files(dest_yaml)
+    for hash_name in needed:
+        matches = _find_th_for_hash(cache, hash_name)
+        if not matches:
+            raise RuntimeError(
+                f"YAML references {hash_name!r} but no file matching "
+                f"{hash_name}-*.th was found in {cache}. Did "
+                f"get_model({model_name!r}) complete successfully?"
+            )
+        for m in matches:
+            dest = output_dir / m.name
+            src_size = m.stat().st_size
+            if force or not dest.exists() or dest.stat().st_size != src_size:
                 if not quiet:
-                    sys.stdout.write("\n")
-                    print(f"  [FAIL] {dest.name} -> {type(exc).__name__}: {exc}")
-                return False
-            wait = RETRY_BACKOFF_S * attempt
-            if not quiet:
-                sys.stdout.write("\n")
-                print(
-                    f"  [retry {attempt}/{retries}] {dest.name}: "
-                    f"{type(exc).__name__}; "
-                    f"resuming from byte {dest.stat().st_size if dest.exists() else 0}; "
-                    f"waiting {wait:.1f}s"
-                )
-            time.sleep(wait)
-
-    if last_exc is not None and not quiet:
-        print(f"  [FAIL] {dest.name} after {retries} retries: {last_exc}")
-    return False
+                    print(f"  [copy] {m.name} ({_format_bytes(src_size)})")
+                shutil.copy2(m, dest)
+            written.append(dest)
+    return written
 
 
 # -----------------------------------------------------------------------------
-# Integrity verification (only the practical one: ask demucs to load the
-# tree via its own LocalRepo path -- that's the schema demucs will demand)
+# Integrity verification -- the gate from models/demucs/README.md
 # -----------------------------------------------------------------------------
 
 
 def verify_layout(repo_dir: Path, expect_model: str) -> tuple[bool, str]:
     """Run ``get_model(<expect_model>, repo=<repo_dir>)`` to confirm the
-    directory is LocalRepo-loadable.
+    directory is :class:`LocalRepo`-loadable.
 
     This is the *only* way to know we built the file layout that
     :class:`LocalRepo` accepts -- there is no public schema. The
     function is the gate the README's "Verification step" calls out;
     exposing it here lets ``build-portable.bat`` invoke it safely.
+
+    NB on the ``repo=`` argument
+    ----------------------------
+    demucs 4.0.1's :class:`LocalRepo` calls ``repo.is_dir()`` on the
+    value we pass -- and ``str.is_dir()`` does not exist.  Pass a
+    :class:`pathlib.Path` (or any :class:`os.PathLike`), NOT a ``str``.
+    Observed empirically on 2026-07-06:
+    ``get_model('htdemucs_ft', repo='<str-path>')`` raises
+    ``AttributeError: 'str' object has no attribute 'is_dir'``;
+    passing a :class:`Path` makes the same call succeed.  This is
+    arguably a bug in the upstream demucs 4.0.1 signature (it would
+    be friendlier to coerce ``str`` -> :class:`Path` internally), but
+    we work around it by passing the right type here.  The same trap
+    exists in :mod:`lyricsfag_lib.audio_analysis` (where
+    ``DemucsIsolator._ensure_separator`` does
+    ``get_model(name, repo=str(bundled_repo_path))``) and is fixed
+    there in lockstep.
     """
     if not _ensure_demucs():
         return False, (
@@ -387,13 +348,26 @@ def verify_layout(repo_dir: Path, expect_model: str) -> tuple[bool, str]:
         )
     try:
         from demucs.pretrained import get_model
-        m = get_model(expect_model, repo=str(repo_dir))
+
+        # PyTorch 2.6 / demucs 4.0.1 ``weights_only`` workaround --
+        # shared implementation lives in :mod:`lyricsfag_lib._torch_compat`
+        # so the script and the library can\'t drift.  ``echo_to_stderr``
+        # is requested so the confirmation line shows up in the CLI
+        # output even when no logging handler is configured.
+        ensure_torch_load_patched(echo_to_stderr=True)
+
+        # NOTE: repo= expects a PathLike, NOT str. See NB above.
+        m = get_model(expect_model, repo=repo_dir)
     except Exception as exc:
         return False, f"get_model({expect_model!r}, repo=...) raised: {exc}"
-    return True, f"OK: samplerate={getattr(m, 'samplerate', '?')} sources={getattr(m, 'sources', '?')}"
+    return True, (
+        f"OK: samplerate={getattr(m, 'samplerate', '?')} "
+        f"sources={getattr(m, 'sources', '?')} type={type(m).__name__}"
+    )
 
 
 def total_size_bytes(repo_dir: Path) -> int:
+    """Sum of on-disk bytes for every file in ``repo_dir`` (no recursion)."""
     return sum(p.stat().st_size for p in repo_dir.glob("*") if p.is_file())
 
 
@@ -415,32 +389,24 @@ def main(argv: Optional[list[str]] = None) -> int:
         "--model",
         default=DEFAULT_MODEL,
         help=(
-            f"Demucs model to download (default: {DEFAULT_MODEL}). "
-            "Filters files.txt to lines starting with this signature "
-            "(so 'htdemucs' keeps the 5 htdemucs weight files but "
-            "drops unrelated ones like mdx_q). Pass an empty string "
-            "to download EVERYTHING (largest footprint)."
+            f"Demucs model to seed (default: {DEFAULT_MODEL}). Must be "
+            f"a model name listed in demucs/remote/*.yaml "
+            f"(htdemucs_ft, htdemucs, mdx, mdx_q, ...). The seed layout "
+            f"is built from the model's YAML descriptor and the files "
+            f"demucs.pretrained.get_model() downloads into "
+            f"~/.cache/torch/hub/checkpoints/."
         ),
     )
     p.add_argument(
         "--output-dir",
         default=DEFAULT_OUTPUT_DIR,
-        help=f"Where to place the files (default: {DEFAULT_OUTPUT_DIR}).",
-    )
-    p.add_argument(
-        "--url",
-        default=None,
-        help=(
-            "Override demucs's ROOT_URL (the canonical endpoint is "
-            "https://dl.fbaipublicfiles.com/demucs/); use this if the "
-            "canonical endpoint is unreachable on your network."
-        ),
+        help=f"Where to place the seeded files (default: {DEFAULT_OUTPUT_DIR}).",
     )
     p.add_argument(
         "--verify",
         action="store_true",
         help=(
-            "After download, run a verification step (calls "
+            "After seeding, run a verification step (calls "
             "demucs.pretrained.get_model(<model>, repo=output_dir) "
             "and prints the result). This is the gate from "
             "models/demucs/README.md."
@@ -449,7 +415,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     p.add_argument(
         "--force",
         action="store_true",
-        help="Re-download even if a file with matching size already exists.",
+        help=(
+            "Re-copy even if a file with matching size already exists "
+            "in the output dir."
+        ),
     )
     p.add_argument(
         "--quiet",
@@ -461,9 +430,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         "--list-only",
         action="store_true",
         help=(
-            "Print the file listing demucs would download (filtered by "
-            "--model) and exit; useful for inspecting what will land on "
-            "disk before committing to a real download."
+            "Print the file listing that would be seeded and exit; "
+            "useful for inspecting what will land on disk before "
+            "committing to a real copy. Note: this STILL triggers "
+            "demucs's auto-download if the cache is cold (we can't "
+            "list without inspecting the cache)."
         ),
     )
     args = p.parse_args(argv)
@@ -475,80 +446,58 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
         return 2
 
-    files_txt, root_url = _demucs_paths()
-    root_url = args.url or root_url
-    print(f"demucs files.txt: {files_txt}")
-    print(f"Base URL:         {root_url}")
-    print(f"Output dir:       {args.output_dir}")
-    if args.model:
-        print(f"Model filter:     {args.model!r}")
-    print()
-
-    all_lines = list_repo_lines(files_txt)
-    selected = select_lines(all_lines, model=args.model or None)
-    if not selected:
-        print(
-            f"  [error] no files.txt lines matched the "
-            f"{'--model ' + repr(args.model) if args.model else 'no-filter'} "
-            "select; aborting.",
-            file=sys.stderr,
-        )
-        return 2
+    out_dir = Path(args.output_dir).resolve()
 
     if args.list_only:
-        print(f"Planned download ({len(selected)} file(s)):")
-        for line, _sig, _h, _ext in selected:
-            print(f"  - {line}")
-        print()
-        print("Use without --list-only to actually fetch.")
-        return 0
-
-    out_dir = Path(args.output_dir).resolve()
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    print(f"Selected {len(selected)} file(s) from files.txt")
-    failed: list[str] = []
-    for line, sig, _h, ext in selected:
-        url = f"{root_url.rstrip('/')}/{line}"
-        dest = out_dir / f"{sig}{ext}"
-        ok = download_file(url, dest, force=args.force, quiet=args.quiet)
-        if not ok:
-            failed.append(line)
-
-    print()
-    if failed:
-        print(f"FAILED for {len(failed)} file(s): {failed}", file=sys.stderr)
-        for line in failed:
+        # Show what would be seeded.  Triggers get_model() so the cache
+        # is populated -- we can't build the listing without inspecting
+        # the YAML, and the YAML only lands in the cache after get_model()
+        # has run.  The copy step below is what's actually skipped.
+        try:
+            ypath = _ensure_model_in_cache(args.model)
+        except Exception as exc:
             print(
-                f"\nDirect URL for {line!r}:\n  {root_url.rstrip('/')}/{line}",
+                f"  [error] could not populate cache for {args.model!r}: {exc}",
                 file=sys.stderr,
             )
+            return 2
+        needed = _needed_th_files(ypath)
+        print(f"Planned seed for {args.model!r} (would copy to {out_dir}):")
         print(
-            f"\nDrop the downloaded files into:\n  {out_dir}\nand re-run "
-            "the script -- files with matching local sizes will be skipped.",
-            file=sys.stderr,
+            f"  - {ypath.name}  ({_format_bytes(ypath.stat().st_size)})"
         )
+        total = ypath.stat().st_size
+        for n in needed:
+            matches = _find_th_for_hash(_native_demucs_cache_dir(), n)
+            for m in matches:
+                sz = m.stat().st_size
+                total += sz
+                print(f"  - {m.name}  ({_format_bytes(sz)})")
+            if not matches:
+                print(
+                    f"  [warn] YAML references {n!r} but no <hash>-*.th "
+                    f"file was found in the cache"
+                )
+        print()
+        print(f"  total: {_format_bytes(total)} across "
+              f"{1 + sum(len(_find_th_for_hash(_native_demucs_cache_dir(), n)) for n in needed)} file(s)")
+        print()
+        print("Use without --list-only to actually copy.")
+        return 0
+
+    # Real seed.
+    try:
+        written = _seed_models_dir(
+            args.model, out_dir, force=args.force, quiet=args.quiet,
+        )
+    except Exception as exc:
+        print(f"  [FAIL] seeding {args.model!r}: {exc}", file=sys.stderr)
         return 1
 
-    print(f"All {len(selected)} file(s) downloaded to {out_dir}")
+    total_bytes = sum(p.stat().st_size for p in written)
     print(
-        "Each weight file was saved as <sig>.<ext> with the hash suffix "
-        "stripped, so demucs.pretrained.LocalRepo can read this directory "
-        "directly via get_model(<sig>, repo=this_path)."
+        f"Seeded {len(written)} file(s), {_format_bytes(total_bytes)} total -> {out_dir}"
     )
-
-    # Sanity-gate: at least the htdemucs subtree, when present, ought to be
-    # >350 MB (5 sub-models x ~84 MB minus slack). We don't fail on this,
-    # but a too-small result signals that something went wrong upstream
-    # (e.g. internet proxy only mirrored part of the bag).
-    sz = total_size_bytes(out_dir)
-    if args.model == "htdemucs" and sz < MIN_HTDEMUCS_BYTES:
-        print(
-            f"  [warn] htdemucs total on disk is only {_format_bytes(sz)} "
-            f"(< {_format_bytes(MIN_HTDEMUCS_BYTES)}). This usually means "
-            "the mirror returned a partial set. Re-run with --force.",
-            file=sys.stderr,
-        )
 
     if args.verify:
         ok, msg = verify_layout(out_dir, args.model)

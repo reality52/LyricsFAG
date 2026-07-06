@@ -19,12 +19,14 @@ state.
 > **Note — default Demucs model.** LyricsFAG's
 > :class:`DemucsIsolator` defaults to ``htdemucs_ft`` (Meta's
 > music-only fine-tune), not the original ``htdemucs``. The fine-tune
-> gives noticeably cleaner vocal isolation on dense mixes at the cost
-> of being a single pretrained run (one ~84 MB download) rather than
-> ``htdemucs``'s 5-sub-model bag (~420 MB). Use
-> ``DemucsIsolator(model="htdemucs")`` /
-> ``FasterWhisperAnalyzer(demucs_model="htdemucs")`` to switch back to
-> the original ensemble if you need it.
+> gives noticeably cleaner vocal isolation on dense mixes but is itself
+> a :class:`demucs.pretrained.BagOfModels` of 4 sub-models
+> (~336 MB on disk: 4 × ~84 MB). The "single pretrained run" framing
+> only applies to ``htdemucs`` itself (~84 MB on demucs 4.0.1 — the
+> legacy 5-sub-model description pre-dates 4.0.1 and no longer
+> applies). Use ``DemucsIsolator(model="htdemucs")`` /
+> ``FasterWhisperAnalyzer(demucs_model="htdemucs")`` to switch to the
+> lighter single-model variant if you want the ~84 MB download.
 
 
 ## Quick reference
@@ -37,15 +39,16 @@ state.
 
 **Which Demucs model?** LyricsFAG's
 :class:`lyricsfag_lib.audio_analysis.DemucsIsolator` defaults to
-**``htdemucs_ft``** (Meta's music-only fine-tune), a single pretrained
-run that downloads ~84 MB on first use. ``htdemucs`` itself is the
-original :class:`BagOfModels` of 5 sub-models (~420 MB total; sub-model
-count confirmed by
-``_parse_remote_files(demucs.pretrained.REMOTE_ROOT / 'files.txt')[htdemucs]``
-returning 5 keys on demucs 4.0.1). Pre-seed whichever model LyricsFAG
-will look for; if you pin ``DemucsIsolator(model="htdemucs")`` /
-``FasterWhisperAnalyzer(demucs_model="htdemucs")``, seed the
-``htdemucs`` bag weights instead via
+**``htdemucs_ft``** (Meta's music-only fine-tune), a
+:class:`demucs.pretrained.BagOfModels` of 4 sub-models that downloads
+~336 MB on first use (4 × ~84 MB). ``htdemucs`` itself is a single
+pretrained HTDemucs (~84 MB) on demucs 4.0.1 — the legacy
+5-sub-model framing pre-dates 4.0.1 and no longer applies (the
+relevant YAML is ``htdemucs.yaml`` whose ``models:`` list contains
+exactly one entry, e.g. ``955717e8``). Pre-seed whichever model
+LyricsFAG will look for; if you pin ``DemucsIsolator(model="htdemucs")`` /
+``FasterWhisperAnalyzer(demucs_model="htdemucs")``, seed the single
+``htdemucs`` weight instead via
 ``python scripts/download_demucs_model.py --model htdemucs``.
 
 
@@ -63,9 +66,12 @@ Demucs 4.x's two paths are:
   auto-download, and it expects names *not* hashes.
 
 So the runtime flow today is: demucs handles its own cache, you pay a
-one-time ~420 MB download (`htdemucs` = 5 sub-models × ~84 MB; see the
-Quick reference table above), and `models/demucs/` stays empty unless a
-developer runs an explicit seed workflow (next section).
+one-time ~336 MB download if you stick with the default ``htdemucs_ft``
+(4 sub-models × ~84 MB) or a much smaller ~84 MB if you pin
+``htdemucs`` (single pretrained model). See the Quick reference table
+above for the per-model breakdown. ``models/demucs/`` stays empty
+unless a developer runs an explicit seed workflow (see
+`scripts/download_demucs_model.py --help`).
 
 
 ## Size comparison
@@ -73,7 +79,7 @@ developer runs an explicit seed workflow (next section).
 | Bundle                          | Files              | Disk      | Notes                                                                 |
 |---------------------------------|--------------------|-----------|-----------------------------------------------------------------------|
 | `models/whisper-base/`          | 4 (config, model.bin, tokenizer, vocabulary) | ~140 MB   | `base` size; ships with the `--add-data` flag for offline .exe        |
-| `models/demucs/` (when seeded)  | demucs's own layout (e.g. `<name>.th`/`<name>.yaml` from `files.txt`) | **~80 MB per sub-model × 5 sub-models = ~420 MB total** for `htdemucs` | Each `.th` we observed is exactly 84 MB; the count of **5 sub-models** is confirmed by `_parse_remote_files(demucs.pretrained.REMOTE_ROOT / 'files.txt')[htdemucs]` returning 5 keys on demucs 4.0.1, so `htdemucs`'s practical footprint is **order ~420 MB**, not ~80 MB. The historical "2 GB" figure was **demucs 3.x** and does **not** apply to 4.x. |
+| `models/demucs/` (when seeded)  | demucs's own layout (e.g. `<name>.th`/`<name>.yaml`) | **~336 MB total** for the default `htdemucs_ft` (BagOfModels of 4 sub-models × ~84 MB); **~84 MB total** for legacy `htdemucs` (single pretrained model) | Each `.th` is ~84 MB on demucs 4.0.1. `htdemucs_ft.yaml` lists `models: ['f7e0c4bc', 'd12395a8', '92cfc3b6', '04573f0d']` (4 sub-models); `htdemucs.yaml` lists `models: ['955717e8']` (1 sub-model). The historical "2 GB" figure was **demucs 3.x** and does **not** apply to 4.x. |
 
 
 ## Demucs 4.x CLI flags — the actual ones
@@ -202,9 +208,11 @@ python -c "import os; from pathlib import Path; from demucs.pretrained import ge
 
 When run against a manual copy (Path A), this is empirically confirmed
 to raise `is neither a single pre-trained model or a bag of models`,
-preventing PyInstaller from baking ~420 MB of deadweight into the
-`.exe`. Once Path B is implemented and tested, this command is
-expected to print `OK: <samplerate> <sources>`.
+preventing PyInstaller from baking ~336 MB of deadweight into the
+`.exe` (the default `htdemucs_ft` BagOfModels of 4 sub-models × ~84 MB;
+pinned `htdemucs` is a single ~84 MB model). Once Path B is implemented
+and tested, this command is expected to print
+`OK: <samplerate> <sources>`.
 
 ### Build hookup (parallel to the existing whisper-base branch)
 
@@ -222,8 +230,9 @@ set "DEMUCS_ARGS="
 REM Require at least one .th weight file before baking the directory in
 REM -- `dir /a-d /b models\demucs\*.th` succeeds iff a real weights file
 REM exists. An empty directory returns exit 1 ("File Not Found"), so the
-REM gate stays false and DEMUCS_ARGS stays unset (no wasteful ~420 MB
-REM in exe; matches the Quick reference table).
+REM gate stays false and DEMUCS_ARGS stays unset (no wasteful ~336 MB
+REM in exe for the default htdemucs_ft / ~84 MB for legacy htdemucs;
+REM matches the Quick reference table).
 dir /a-d /b models\demucs\*.th >nul 2>&1
 if not errorlevel 1 (
     set "DEMUCS_ARGS=--collect-all demucs"
@@ -277,9 +286,10 @@ Notes on the snippet:
   `~/.cache/torch` write happens.
 * Subsequent runs: same path; cache stays clean.
 * Users without the bundle: fall back to today's auto-download path
-  (~420 MB once, then cached) — htdemucs is a `BagOfModels` of
-  5 sub-models × ~84 MB = ~420 MB, same math as the Quick reference
-  table above.
+  (~336 MB once, then cached) for the default `htdemucs_ft`
+  (4 sub-models × ~84 MB). Pinning the legacy `htdemucs` drops the
+  one-time download to ~84 MB (single pretrained model). See the
+  Quick reference table above for the per-model breakdown.
 
 
 ## Caveats / gotchas
@@ -304,10 +314,11 @@ Notes on the snippet:
   stop loading cleanly. Re-seed + rebuild whenever upgrading `demucs`.
 
 * **PyInstaller `--onefile` quirk.** Each launch re-extracts the
-  ~420 MB weights directory (htdemucs = 5 sub-models × ~84 MB; see
-  Size comparison above) to a temp dir. For a faster cold-start,
-  switch to `--onedir` (folder-based distribution) once demucs
-  weights are bundled — same trade-off `models/whisper-base`
+  bundled weights directory to a temp dir: ~336 MB for the default
+  `htdemucs_ft` (4 sub-models × ~84 MB; see Size comparison above),
+  or ~84 MB if you pinned the single-model `htdemucs`. For a faster
+  cold-start, switch to `--onedir` (folder-based distribution) once
+  demucs weights are bundled — same trade-off `models/whisper-base`
   already pays at ~140 MB.
 
 * **`build.bat` env vars.** The existing `LYRICSFAG_AUDIO=1` flag
