@@ -1,5 +1,9 @@
 # LyricsFAG
 
+[![GitHub repo](https://img.shields.io/badge/GitHub-reality52%2FLyricsFAG-181717?logo=github)](https://github.com/reality52/LyricsFAG)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
 A small, dependency-light command-line tool that walks a music library,
 reads audio tags, and writes matching `.lrc` files next to each track.
 
@@ -38,6 +42,27 @@ Supports the following audio formats (anything `mutagen` can read):
 
    See [Building the executable](#building-the-executable) below for the
    per-variant output table and the helper scripts that pre-seed weights.
+
+4. *(Optional)* Pre-seed the local audio-analysis weights before your
+   first run with the bundled helper scripts. Both live in `scripts/`
+   and only need `python` plus the corresponding optional dependency
+   (`faster-whisper`, `demucs`) from `requirements.txt`:
+
+   ```bat
+   REM Whisper weights (~150 MB for the default 'base' size).
+   python scripts\download_whisper_model.py --size base
+
+   REM Demucs weights (~420 MB for 'htdemucs' = 5 sub-models x ~84 MB).
+   REM --verify runs an end-to-end load check before you bake them in.
+   python scripts\download_demucs_model.py --model htdemucs
+   python scripts\download_demucs_model.py --model htdemucs --verify
+   ```
+
+   Both scripts support `Range:`-header resume, so re-running them on a
+   flaky connection only re-downloads the missing bytes. Full reference
+   for flags, mirrors, and troubleshooting lives in
+   [Local audio-analysis fallback (faster-whisper)](#local-audio-analysis-fallback-faster-whisper)
+   and [Building the executable](#building-the-executable) below.
 
 
 ## Graphical mode
