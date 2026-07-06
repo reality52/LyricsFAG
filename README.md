@@ -64,11 +64,17 @@ Supports the following audio formats (anything `mutagen` can read):
    REM Whisper weights (~150 MB for the default 'base' size).
    python scripts\download_whisper_model.py --size base
 
-   REM Demucs weights (~420 MB for 'htdemucs' = 5 sub-models x ~84 MB).
+   REM Demucs weights for the default 'htdemucs_ft' (~84 MB single model).
    REM --verify runs an end-to-end load check before you bake them in.
-   python scripts\download_demucs_model.py --model htdemucs
-   python scripts\download_demucs_model.py --model htdemucs --verify
+   REM (No --model flag needed -- scripts/download_demucs_model.py
+   REM  defaults to htdemucs_ft now.)
+   python scripts\download_demucs_model.py
+   python scripts\download_demucs_model.py --verify
    ```
+
+   *(If you explicitly opted into the legacy 5-sub-model bag via
+   ``--demucs-model htdemucs``, seed that one instead:
+   ``python scripts\download_demucs_model.py --model htdemucs --verify``.)*
 
    Both scripts support `Range:`-header resume, so re-running them on a
    flaky connection only re-downloads the missing bytes. Full reference
@@ -273,7 +279,7 @@ variants. Both produce a CLI and a windowed GUI .exe into the SAME
 
 | Variant   | Output binaries                                  | Footprint       | Network on first run |
 |-----------|--------------------------------------------------|-----------------|----------------------|
-| **lite**  | `dist\LyricsFAG-Lite.exe`, `dist\LyricsFAG-GUI-Lite.exe` | ~50 MB          | Yes — downloads Whisper (~150 MB) and Demucs (~420 MB) weights on first `--use-audio-analysis` |
+| **lite**  | `dist\LyricsFAG-Lite.exe`, `dist\LyricsFAG-GUI-Lite.exe` | ~50 MB          | Yes — downloads Whisper (~150 MB) and Demucs (~84 MB) weights on first `--use-audio-analysis` |
 | **portable** | `dist\LyricsFAG-Portable.exe`, `dist\LyricsFAG-GUI-Portable.exe` | ~600 MB       | No  — once weights are pre-seeded via the helper scripts below, the .exe is fully offline |
 
 ### Build commands
@@ -304,13 +310,17 @@ The portable .exe only ships weights that you pre-seed into `models\`
 REM 1. Whisper weights (~150 MB; ~150 MB after download).
 python scripts\download_whisper_model.py --size base
 
-REM 2. Demucs weights (~420 MB; 5 sub-models of ~84 MB each).
+REM 2. Demucs weights for the default 'htdemucs_ft' (~84 MB single model).
 REM    The script reads demucs's own files.txt listing so the layout is
 REM    automatically LocalRepo-loadable (Path B in models\demucs\README.md).
-python scripts\download_demucs_model.py --model htdemucs
+REM    (No --model flag needed -- the script defaults to htdemucs_ft.)
+python scripts\download_demucs_model.py
 
 REM 3. Verify the directory is in a working state before baking.
-python scripts\download_demucs_model.py --model htdemucs --verify
+python scripts\download_demucs_model.py --verify
+
+REM    (If you pinned the legacy --demucs-model htdemucs, pass --model htdemucs
+REM    here instead of the default -- it pulls the larger 5-sub-model bag.)
 
 REM 4. Build the offline-ready .exe pair.
 build.bat portable
@@ -383,6 +393,44 @@ existing ``LyricsFAGApp.mainloop()`` call in ``lyricsfag_gui.py`` and replace
 with a tray icon callback that calls ``_on_start`` periodically (out of scope
 for the initial release).
 
+
+## Release history
+
+Detailed per-release notes live as `RELEASE_NOTES_X.Y.Z.md` at the repo root.
+
+### v1.0.2
+
+Pre-release polish. No API changes.
+
+- **GUI:** `?  Help` button (last in the toolbar row, right of Open output
+  folder) opens `messagebox.showinfo(...)` with the LRCLIB → Genius →
+  local-audio provider chain, the `GENIUS_ACCESS_TOKEN` /
+  `--genius-token` hint, first-run Whisper / Demucs sizes, and a
+  `--dry-run` safety tip.
+- **GUI:** hover tooltips on every primary input widget (entries,
+  checkbuttons, combos, buttons) — 500 ms hover delay, 8 s auto-dismiss.
+- **GUI:** completion popup — Done / Stopped / worker-crashed, with
+  `winfo_exists()` race protection against `_on_close`. Empty folders
+  no longer trigger one.
+- **Startup:** `audio_analysis.describe_models_layout()` logs the
+  resolved `models/whisper-base/` + `models/demucs/` paths so users
+  can verify where weights actually land without grepping the source.
+- **Cleanup:** dropped unused `COLOUR_BG` constant and unused
+  `_format_provider_breakdown` import; renamed the audio-row Device
+  label to stop shadowing the status-row badge. `lyricsfag_lib.__version__`
+  is now `1.0.2` (had been stuck at `0.1.0` since the initial scaffolding).
+
+See [`RELEASE_NOTES_1.0.2.md`](RELEASE_NOTES_1.0.2.md) for the full
+per-commit breakdown.
+
+### v1.0.1
+
+First tagged release — README polish, Russian translation (`README.ru.md`),
+AI-assistance disclaimer, simpler Whisper diagnostic in `.lrc`.
+
+See [`RELEASE_NOTES_1.0.1.md`](RELEASE_NOTES_1.0.1.md) (the file was added
+on `main` in v1.0.2 as a retroactive backfill; the `1.0.1` git tag's tree
+doesn't contain it).
 
 ## License & credits
 
