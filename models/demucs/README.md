@@ -7,14 +7,37 @@ native cache, and LyricsFAG lets demucs use that path as-is.
 If `models/demucs/` looks empty on a fresh clone, that is the intended
 state.
 
+> **Note — default Demucs model.** LyricsFAG's
+> :class:`DemucsIsolator` defaults to ``htdemucs_ft`` (Meta's
+> music-only fine-tune), not the original ``htdemucs``. The fine-tune
+> gives noticeably cleaner vocal isolation on dense mixes at the cost
+> of being a single pretrained run (one ~84 MB download) rather than
+> ``htdemucs``'s 5-sub-model bag (~420 MB). Use
+> ``DemucsIsolator(model="htdemucs")`` /
+> ``FasterWhisperAnalyzer(demucs_model="htdemucs")`` to switch back to
+> the original ensemble if you need it.
+
 
 ## Quick reference
 
 | Where                                          | What lives there            | When it's populated                                                 |
 |------------------------------------------------|-----------------------------|---------------------------------------------------------------------|
-| `~/.cache/torch/hub/checkpoints/<hash>.th`     | demucs weights (~80 MB **per sub-model**; htdemucs's `BagOfModels` = 5 sub-models = ~420 MB total; sub-model count confirmed by `_parse_remote_files(demucs.pretrained.REMOTE_ROOT / 'files.txt')[htdemucs]` returning 5 keys on demucs 4.0.1) | first `python -m demucs …` or LyricsFAG run with `--use-audio-analysis`|
+| `~/.cache/torch/hub/checkpoints/<hash>.th`     | Demucs weights (size varies — see below) | first `python -m demucs …` or LyricsFAG run with `--use-audio-analysis`|
 | `models/demucs/` *(this directory)*            | _intentionally empty_       | future seed-and-bundle (Path B pending — see "Future workflow")     |
 | `models/whisper-base/`                         | faster-whisper weights      | `python scripts/download_whisper_model.py --size base`              |
+
+**Which Demucs model?** LyricsFAG's
+:class:`lyricsfag_lib.audio_analysis.DemucsIsolator` defaults to
+**``htdemucs_ft``** (Meta's music-only fine-tune), a single pretrained
+run that downloads ~84 MB on first use. ``htdemucs`` itself is the
+original :class:`BagOfModels` of 5 sub-models (~420 MB total; sub-model
+count confirmed by
+``_parse_remote_files(demucs.pretrained.REMOTE_ROOT / 'files.txt')[htdemucs]``
+returning 5 keys on demucs 4.0.1). Pre-seed whichever model LyricsFAG
+will look for; if you pin ``DemucsIsolator(model="htdemucs")`` /
+``FasterWhisperAnalyzer(demucs_model="htdemucs")``, seed the
+``htdemucs`` bag weights instead via
+``python scripts/download_demucs_model.py --model htdemucs``.
 
 
 ## Why is this folder empty?

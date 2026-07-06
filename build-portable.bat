@@ -10,7 +10,11 @@ REM   dist\LyricsFAG-GUI-Portable.exe     -- GUI  (~600 MB)
 REM
 REM Prerequisite for a fully-bundled build:
 REM   python scripts\download_whisper_model.py --size base
-REM   python scripts\download_demucs_model.py --model htdemucs
+REM   python scripts\download_demucs_model.py
+REM     (defaults to htdemucs_ft, Meta's music-only fine-tune, ~84 MB.
+REM      Pass --model htdemucs to seed the legacy 5-sub-model BagOfModels
+REM      instead; LyricsFAG only uses that one when explicitly pinned via
+REM      DemucsIsolator(model="htdemucs") / FasterWhisperAnalyzer(demucs_model="htdemucs").)
 REM
 REM The build will skip whichever model directories are absent (and warn
 REM about it), so a quick `build-portable.bat` run without seeded
@@ -72,13 +76,16 @@ REM Not Found"), which is exactly the gate we want: a README-only
 REM models\demucs\ MUST NOT trigger a 420 MB bake into a 50 MB .exe.
 dir /a-d /b models\demucs\*.th >nul 2>&1
 if not errorlevel 1 (
-    echo Bundling models\demucs\ into the .exe (~420 MB).
+    echo Bundling models\demucs\ into the .exe (~84 MB with htdemucs_ft).
     set "DEMUCS_ARGS=--add-data models\demucs;models\demucs --collect-all demucs"
 ) else (
     echo.
     echo === NOTE: models\demucs\ has no .th files ===
-    echo   Demucs will download ~420 MB on first --use-audio-analysis.
-    echo   To bundle: python scripts\download_demucs_model.py --model htdemucs
+    echo   Demucs will download ~84 MB on first --use-audio-analysis
+    echo   (htdemucs_ft, the new default).
+    echo   To bundle: python scripts\download_demucs_model.py
+    echo   For legacy htdemucs BagOfModels (~420 MB):
+    echo     python scripts\download_demucs_model.py --model htdemucs
 )
 
 echo.

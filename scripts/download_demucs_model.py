@@ -79,7 +79,12 @@ from typing import Iterable, Optional
 _F_LINE = re.compile(r"^(?P<sig>.+?)-(?P<hash>[0-9a-f]{6,12})(?P<ext>\.[A-Za-z0-9]+)$")
 
 DEFAULT_OUTPUT_DIR = "models/demucs"
-DEFAULT_MODEL = "htdemucs"
+# ``htdemucs_ft`` is the music-only fine-tune of ``htdemucs`` --
+# LyricsFAG now defaults to it for vocal isolation (single ~84 MB
+# download vs htdemucs's 5-sub-model bag at ~420 MB). ``htdemucs``
+# remains selectable via ``--model htdemucs`` for users who want the
+# base ensemble.
+DEFAULT_MODEL = "htdemucs_ft"
 DEFAULT_URL = "https://dl.fbaipublicfiles.com/demucs/"
 
 CHUNK_BYTES = 64 * 1024
