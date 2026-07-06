@@ -40,9 +40,24 @@ Supports the following audio formats (anything `mutagen` can read):
 2. From the project root:
 
    ```bat
+   REM Core chain (LRCLIB + Genius).  Always installed.
    pip install -r requirements.txt
    python lyricsfag.py "C:\Music\Library"
    ```
+
+   To add local audio analysis (Whisper + Demucs, ~4 GB extra) for
+   `--use-audio-analysis` on the command line, install the
+   `requirements-audio.txt` extra **next**:
+
+   ```bat
+   pip install -r requirements.txt
+   pip install -r requirements-audio.txt
+   ```
+
+   The split exists so the `build-lite.bat` PyInstaller .exe can
+   stay at the documented ~50 MB footprint without bundling `torch`;
+   see [Building the executable](#building-the-executable) for the
+   per-variant contract.
 
 3. To build prebuilt `.exe` binaries (no Python required for the user):
 
@@ -259,8 +274,13 @@ going on the LRCLIB+Genius chain without crashing.
 
 ### Notes
 
-- After `pip install faster-whisper` and the model is on disk, the
-  analyzer loads it with `local_files_only=True` (no internet needed).
+- After `pip install -r requirements-audio.txt` (which pulls
+  `faster-whisper`) and the model is on disk, the analyzer loads it
+  with `local_files_only=True` (no internet needed).
+- The **lite** PyInstaller build does **not** install
+  `requirements-audio.txt`, so its users see a `LyricsFailure`
+  with a hint pointing at the portable build. See
+  [Building the executable](#building-the-executable) for why.
 - Provide your own model directory via `--audio-model-path` to ship a
   pre-downloaded model with your .exe. The portable build helper
   `build-portable.bat` auto-detects whatever is in `models\whisper-base\`
@@ -277,10 +297,28 @@ going on the LRCLIB+Genius chain without crashing.
 variants. Both produce a CLI and a windowed GUI .exe into the SAME
 `dist\` directory, distinguished by filename so they coexist:
 
-| Variant   | Output binaries                                  | Footprint       | Network on first run |
-|-----------|--------------------------------------------------|-----------------|----------------------|
-| **lite**  | `dist\LyricsFAG-Lite.exe`, `dist\LyricsFAG-GUI-Lite.exe` | ~50 MB          | Yes — downloads Whisper (~150 MB) and Demucs (~84 MB) weights on first `--use-audio-analysis` |
-| **portable** | `dist\LyricsFAG-Portable.exe`, `dist\LyricsFAG-GUI-Portable.exe` | ~600 MB       | No  — once weights are pre-seeded via the helper scripts below, the .exe is fully offline |
+| Variant     | Output binaries                                          | Footprint | Audio analysis                            | Network on first run |
+|-------------|----------------------------------------------------------|-----------|-------------------------------------------|----------------------|
+| **lite**    | `dist\LyricsFAG-Lite.exe`, `dist\LyricsFAG-GUI-Lite.exe` | **~50 MB** | **Not supported** (LRCLIB + Genius only)  | No                   |
+| **portable**| `dist\LyricsFAG-Portable.exe`, `dist\LyricsFAG-GUI-Portable.exe` | **~3.5 GB** | Full Whisper + Demucs + bundled weights    | No  — once weights are pre-seeded via the helper scripts below, the .exe is fully offline |
+
+> **Why is the lite build small but the portable build ~3.5 GB?**
+> `demucs` 4.x pulls in `torch` transitively (~4 GB on Windows).
+> PyInstaller `--onefile` bundles the whole Python environment into
+> the .exe, so the portable build pays the full torch cost (~3.5 GB
+> with bundled model weights) and the lite build skips that cost
+> entirely by not installing `requirements-audio.txt`. The **only
+> difference** between the two variants is whether
+> `requirements-audio.txt` is installed before `pyinstaller`. See
+> `requirements.txt` and `requirements-audio.txt` for the split.
+
+> **Behavioural change vs v1.1.2:** the **lite** build no longer
+> supports the local audio-analysis chain. Users who tick "Use audio
+> analysis" in the lite GUI (or pass `--use-audio-analysis` to the
+> lite CLI) get a clean `LyricsFailure` pointing at the portable
+> build instead of the misleading `pip install faster-whisper`
+> hint. This is the only way to deliver a true ~50 MB lite .exe —
+> `torch` alone is ~3.8 GB.
 
 ### Build commands
 
@@ -371,7 +409,8 @@ LyricsFAG/
 │   ├── lyrics.py            # LRCLIB + Genius clients
 │   ├── lrc.py               # LRC serializer
 │   └── settings.py          # persistent GUI settings (JSON under %APPDATA%)
-├── requirements.txt
+├── requirements.txt         # core deps (always installed)
+├── requirements-audio.txt   # optional Whisper + Demucs + torch
 ├── build.bat                # orchestrator: lite / portable / all
 ├── build-lite.bat           # ~50 MB .exe pair (download models on first use)
 ├── build-portable.bat       # ~600 MB .exe pair (weights bundled in)

@@ -1,0 +1,47 @@
+# Local audio-analysis fallback (faster-whisper + demucs + scipy + their
+# transitive ``torch`` dependency).
+#
+# This is a SEPARATE file from ``requirements.txt`` so the ``lite``
+# PyInstaller build can ship without ``torch`` and stay at the
+# documented ~50 MB footprint.  See ``build-lite.bat`` and
+# ``README.md`` \u2192 "Building the executable" for the full
+# per-variant contract.
+#
+# Who installs this file?
+# ------------------------
+#   1. ``build-portable.bat``        -- bundles the whole audio stack
+#                                      into the portable .exe (~3.5 GB).
+#   2. Dev installs that want local  -- run
+#      Whisper + Demucs on the       ``python -m pip install -r
+#      command line.                   requirements-audio.txt``
+#                                      next to the existing
+#                                      ``-r requirements.txt`` install.
+#
+# Who does NOT install this file?
+# -------------------------------
+#   * ``build-lite.bat`` -- the lite .exe is intentionally
+#     audio-free; users who tick "Use audio analysis" in the lite
+#     GUI get a clean ``LyricsFailure`` telling them to grab the
+#     portable build instead.  See
+#     ``lyricsfag_lib.audio_analysis.FasterWhisperAnalyzer.get``
+#     for the frozen-build branch of that error.
+
+# faster-whisper is soft-pinned: the analyzer still detects a missing
+# install and surfaces a LyricsFailure.  The download script in
+# scripts/download_whisper_model.py fetches the matching checkpoint for
+# the default "base" size on first use.
+faster-whisper>=1.0
+
+# Optional vocal-isolation pre-stage.  Pipeline falls back to raw audio
+# when demucs isn't importable.  Demucs 4.x pulls in ``torch``
+# transitively (~4 GB on Windows), which is the entire reason this
+# file is separate from ``requirements.txt`` -- the ``lite`` build is
+# meant to ship without torch so a fresh ``build.bat lite`` does not
+# bloat the resulting .exe by 4 GB.
+demucs>=4.0
+
+# Defensive fallback for Demucs \u2192 Whisper sample-rate conversion when
+# torchaudio isn't available (demucs v4 normally ships it as a
+# dependency, but we keep scipy in there as a numeric polyphase
+# backup).
+scipy>=1.10

@@ -1,19 +1,19 @@
-# Core lyrics chain (always installed).
+# Core lyrics chain (always installed; needed for both the ``lite`` and
+# the ``portable`` PyInstaller builds).
 mutagen>=1.47
 requests>=2.31
 lyricsgenius>=3.0
 
-# Local audio-analysis fallback (faster-whisper is soft-pinned: the analyzer
-# still detects a missing install and surfaces a LyricsFailure).  The
-# download script in scripts/download_whisper_model.py fetches the matching
-# checkpoint for the default "base" size on first use.
-faster-whisper>=1.0
-
-# Optional vocal-isolation pre-stage.  Pipeline falls back to raw audio when
-# demucs isn't importable.
-demucs>=4.0
-
-# Defensive fallback for Demucs → Whisper sample-rate conversion when
-# torchaudio isn't available (demucs v4 normally ships it as a dependency,
-# but we keep scipy in there as a numeric polyphase backup).
-scipy>=1.10
+# The local audio-analysis fallback (faster-whisper + demucs + scipy +
+# their transitive torch dependency) is a SEPARATE file --
+# ``requirements-audio.txt``.  ``build-lite.bat`` does NOT install
+# it, so the ``lite`` .exe stays at the documented ~50 MB footprint
+# and does NOT support the local audio-analysis chain (LRCLIB + Genius
+# only).  ``build-portable.bat`` does install it, so the ``portable``
+# .exe bundles torch + demucs + faster-whisper + scipy in addition to
+# the pre-seeded model weights and lands at ~3.5 GB on disk.
+#
+# See ``requirements-audio.txt`` for the audio-stack deps and
+# ``README.md`` \u2192 "Building the executable" for the per-variant size
+# table and the exact install command for dev runs that want
+# Whisper + Demucs on the command line.

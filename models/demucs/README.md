@@ -7,6 +7,15 @@ native cache, and LyricsFAG lets demucs use that path as-is.
 If `models/demucs/` looks empty on a fresh clone, that is the intended
 state.
 
+> **Lite build note (v1.1.3+).** The `build-lite.bat` PyInstaller
+> variant does **not** bundle Demucs (or the `torch` it depends on)
+> so the resulting `LyricsFAG-Lite.exe` / `LyricsFAG-GUI-Lite.exe`
+> stay at the documented ~50 MB footprint. Users who run the lite
+> build and tick "Use audio analysis" get a clean `LyricsFailure`
+> pointing at the portable build instead of the misleading
+> `pip install demucs` hint. See `README.md` →
+> "Building the executable" for the per-variant size table.
+
 > **Note — default Demucs model.** LyricsFAG's
 > :class:`DemucsIsolator` defaults to ``htdemucs_ft`` (Meta's
 > music-only fine-tune), not the original ``htdemucs``. The fine-tune

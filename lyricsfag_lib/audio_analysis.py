@@ -277,6 +277,41 @@ class AudioAnalyzer(ABC):
 # -----------------------------------------------------------------------
 
 
+def missing_audio_hint(pkg: str) -> str:
+    """User-facing error string for a missing optional audio dependency.
+
+    Two branches:
+      * Normal dev run: hint at ``pip install <pkg>``.
+      * Frozen PyInstaller build (most likely the lite build, which
+        intentionally omits the audio stack so the .exe stays at the
+        documented ~50 MB): point the user at the **portable** build
+        instead.  ``pip install`` can't be done inside a read-only
+        bundled .exe, so the dev-run hint would just confuse them.
+
+    The function is now part of the public surface (no leading
+    underscore) so :mod:`lyricsfag` and :mod:`lyricsfag_gui` can
+    import it and route their own "audio not available" warnings
+    through the same dev / frozen branch.  The two internal call
+    sites below (:meth:`FasterWhisperAnalyzer.get` and
+    :meth:`DemucsIsolator._ensure_separator`) and the three
+    external ones in :mod:`lyricsfag` and :mod:`lyricsfag_gui`
+    all share this string so a lite `.exe` user always gets a
+    consistent "use the portable build" hint instead of the
+    misleading "pip install ..." that can't run inside a
+    read-only bundled binary.  The output is rendered as a
+    :class:`LyricsFailure.reason` for the GUI / CLI log panel,
+    so it should stay a single sentence (no bullet lists or
+    newlines) to match the surrounding error formatting.
+    """
+    if getattr(sys, "frozen", False):
+        return (
+            f"{pkg} not bundled in this .exe (the lite build does "
+            "not include the audio-analysis stack; use the portable "
+            "build to enable local Whisper + Demucs)"
+        )
+    return f"{pkg} not installed (pip install {pkg})"
+
+
 def _resolve_model_path(model_id: str, model_path: Optional[Path]) -> Optional[Path]:
     """Return the absolute path to use for ``WhisperModel(..., local_files_only=True)``.
 
@@ -559,7 +594,7 @@ class DemucsIsolator:
         if self._model is not None:
             return
         if not self.enabled:
-            raise RuntimeError("demucs not installed (pip install demucs)")
+            raise RuntimeError(missing_audio_hint("demucs"))
         from demucs.pretrained import get_model
 
         self._resolved_device = resolve_device(self.device_pref)
@@ -1116,9 +1151,7 @@ class FasterWhisperAnalyzer(AudioAnalyzer):
         stop_event: Optional[threading.Event] = None,
     ) -> LyricsResult | LyricsFailure:
         if not self.enabled:
-            return LyricsFailure(
-                self.name, "faster-whisper not installed (pip install faster-whisper)"
-            )
+            return LyricsFailure(self.name, missing_audio_hint("faster-whisper"))
 
         # 1. Cheap pre-flight: detect pure-silence or no-vocals so we never
         #    pay the cost of loading + running Demucs / Whisper on an
@@ -1287,6 +1320,7 @@ __all__: Iterable[str] = (
     "SUPPORTED_MODELS",
     "WHISPER_SR",
     "describe_models_layout",
+    "missing_audio_hint",
     "planned_first_run_download",
     "warn_first_run_aggregate",
 )

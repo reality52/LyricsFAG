@@ -44,6 +44,30 @@ echo === LyricsFAG build orchestrator ===
 echo   target: %TARGET%
 echo.
 
+REM Clean previous artifacts ONCE here so the variant scripts don't
+REM clobber each other.  Previously each variant script did its own
+REM ``rmdir /s /q dist`` at the top, which meant the second variant
+REM wiped the first variant's outputs -- e.g. ``build.bat all`` used
+REM to leave only the lite exes in dist\, with the portable ones
+REM silently deleted (the bug report was: "two huge exes in dist,
+REM but I expected both portable and lite").  Doing the wipe here
+REM once means all four .exe files
+REM (``LyricsFAG-Portable.exe`` + ``LyricsFAG-GUI-Portable.exe``
+REM  + ``LyricsFAG-Lite.exe`` + ``LyricsFAG-GUI-Lite.exe``)
+REM coexist in dist\ after a ``build.bat all`` run.
+REM When building both variants (``all``), wipe dist/ + build/ +
+REM .spec files at the top so the variant scripts don't have to
+REM (each variant only needs to clean its own previous .spec + .exe
+REM in case the user invokes it standalone).  For single-target
+REM builds we leave the other variant's outputs alone so the user
+REM can build one variant at a time without nuking the other --
+REM a destructive single-target cleanup was the behaviour the
+REM v1.1.3 reviewer flagged.
+if /i "%TARGET%"=="all" (
+    if exist build rmdir /s /q build
+    if exist dist  rmdir /s /q dist
+)
+
 REM Order matters: portable first (longer), then lite. Both write to the
 REM SAME dist\ directory but with distinct names so the four .exe files
 REM coexist.  Callers that only want one variant pass the matching arg

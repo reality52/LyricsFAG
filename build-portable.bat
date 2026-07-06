@@ -1,12 +1,30 @@
 @echo off
 REM Build the "portable" LyricsFAG variants: a CLI/GUI .exe pair that
-REM bundles faster-whisper weights (models\whisper-base\) and, when
-REM available, the demucs weights (models\demucs\) for fully offline
-REM first-run operation.
+REM bundles the full audio stack (torch + demucs + faster-whisper +
+REM scipy, installed via ``requirements-audio.txt``) and, when
+REM available, the model weights themselves (models\whisper-base\,
+REM models\demucs\ when populated) for fully offline first-run
+REM operation.
 REM
 REM Output (alongside any lite variants):
-REM   dist\LyricsFAG-Portable.exe         -- CLI  (~600 MB)
-REM   dist\LyricsFAG-GUI-Portable.exe     -- GUI  (~600 MB)
+REM   dist\LyricsFAG-Portable.exe         -- CLI  (~3.5 GB)
+REM   dist\LyricsFAG-GUI-Portable.exe     -- GUI  (~3.5 GB)
+REM
+REM Footprint breakdown
+REM -------------------
+REM   * torch (transitive of demucs 4.x)    ~3.8 GB
+REM   * bundled whisper weights             ~150 MB (only if
+REM                                            models\whisper-base\
+REM                                            exists)
+REM   * bundled demucs weights              ~84 MB (only if
+REM                                            models\demucs\*.th
+REM                                            exists; the default
+REM                                            ``htdemucs_ft`` is
+REM                                            a single ~84 MB file;
+REM                                            ``htdemucs`` is a
+REM                                            5-sub-model bag of
+REM                                            ~420 MB)
+REM   * everything else                     ~30 MB
 REM
 REM Prerequisite for a fully-bundled build:
 REM   python scripts\download_whisper_model.py --size base
@@ -20,23 +38,38 @@ REM The build will skip whichever model directories are absent (and warn
 REM about it), so a quick `build-portable.bat` run without seeded
 REM weights produces a partially-portable .exe that still downloads the
 REM missing bits on first use.
+REM
+REM Cleanup
+REM -------
+REM We DO clean our own previous .spec + .exe at the top so a
+REM standalone re-run of this script (or the orchestrator's
+REM ``all`` path, which wipes everything anyway) gets a fresh
+REM PyInstaller pass without stale configs.  We do NOT clean the
+REM whole ``dist\`` -- the orchestrator only does that when
+REM ``all`` is requested, and a single-target build is meant to
+REM leave the other variant's outputs alone.  This was the
+REM v1.1.3 reviewer-flagged behaviour.
 
 setlocal
 
 set "ROOT=%~dp0"
 pushd "%ROOT%"
 
+echo === Cleaning our own previous outputs ===
+REM See the matching block in build-lite.bat for the rationale --
+REM the orchestrator only wipes dist\ wholesale when ``all`` is
+REM requested, so single-target builds preserve the other
+REM variant's outputs.
+if exist dist\LyricsFAG-Portable.exe      del /q dist\LyricsFAG-Portable.exe
+if exist dist\LyricsFAG-GUI-Portable.exe  del /q dist\LyricsFAG-GUI-Portable.exe
+if exist LyricsFAG-Portable.spec          del /q LyricsFAG-Portable.spec
+if exist LyricsFAG-GUI-Portable.spec      del /q LyricsFAG-GUI-Portable.spec
+
 echo === Installing build + runtime dependencies (portable) ===
 pip install --upgrade pip
 pip install -r requirements.txt
+pip install -r requirements-audio.txt
 pip install pyinstaller==6.*
-pip install faster-whisper==1.*
-pip install demucs>=4.0
-
-echo === Cleaning previous build artifacts ===
-if exist build rmdir /s /q build
-if exist dist  rmdir /s /q dist
-del /q LyricsFAG-Portable.spec LyricsFAG-GUI-Portable.spec 2>nul
 
 REM Compose the PyInstaller --add-data flags.  Order matters only for the
 REM log output; both flags can coexist safely.
@@ -116,8 +149,8 @@ if errorlevel 1 goto :fail
 
 echo.
 echo === Portable build complete ===
-echo   dist\LyricsFAG-Portable.exe       (CLI,  ~600 MB with bundled weights)
-echo   dist\LyricsFAG-GUI-Portable.exe   (GUI,  ~600 MB with bundled weights)
+echo   dist\LyricsFAG-Portable.exe       (CLI,  ~3.5 GB; torch+demucs+faster-whisper+models)
+echo   dist\LyricsFAG-GUI-Portable.exe   (GUI,  ~3.5 GB; torch+demucs+faster-whisper+models)
 popd
 endlocal
 exit /b 0

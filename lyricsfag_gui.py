@@ -60,6 +60,7 @@ from lyricsfag_lib.audio import iter_audio_files  # noqa: E402
 from lyricsfag_lib.audio_analysis import (  # noqa: E402
     SUPPORTED_MODELS as _SUPPORTED_AUDIO_MODELS,
     describe_models_layout,
+    missing_audio_hint,
     warn_first_run_aggregate,
 )
 from lyricsfag_lib.device import (  # noqa: E402
@@ -377,8 +378,8 @@ def _run_worker(
         audio_analyzer = _build_audio_analyzer(cfg, ui_queue)
         if cfg.use_audio_analysis and audio_analyzer is None:
             LOG.warning(
-                "Audio analysis enabled but faster-whisper not installed. "
-                "Install with: pip install faster-whisper"
+                "Audio analysis enabled but %s",
+                missing_audio_hint("faster-whisper"),
             )
         elif audio_analyzer is not None:
             LOG.info("Local audio-analysis fallback ready.")

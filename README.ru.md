@@ -44,6 +44,7 @@
 2. Из корня проекта:
 
    ```bat
+   REM Основная цепочка (LRCLIB + Genius).  Всегда устанавливается.
    pip install -r requirements.txt
    python lyricsfag.py "C:\Music\Library"
    ```
@@ -267,8 +268,13 @@ models/whisper-base/
 
 ### Примечания
 
-- После `pip install faster-whisper` и появления модели на диске
-  анализатор грузит её с `local_files_only=True` (интернет не нужен).
+- После `pip install -r requirements-audio.txt` (который тянет
+  `faster-whisper`) и появления модели на диске анализатор
+  грузит её с `local_files_only=True` (интернет не нужен).
+- **lite**-сборка PyInstaller **не** ставит
+  `requirements-audio.txt`, поэтому её пользователи видят
+  `LyricsFailure` с подсказкой про portable.  Подробности — в
+  [Сборка исполняемого файла](#сборка-исполняемого-файла).
 - Можно указать собственную папку с моделью через `--audio-model-path`,
   чтобы вшить пред-скачанные веса в ваш `.exe`. Скрипт `build-portable.bat`
   автоматически подхватывает всё, что лежит в `models\whisper-base\` и
@@ -286,10 +292,22 @@ models/whisper-base/
 PyInstaller. Оба кладут CLI- и оконный GUI-`.exe` в одну и ту же папку
 `dist\`. Файлы отличаются по имени и потому сосуществуют:
 
-| Вариант     | Выходные бинарники                                          | Размер     | Сеть при первом запуске                                                                                          |
-|-------------|-------------------------------------------------------------|------------|-----------------------------------------------------------------------------------------------------------------|
-| **lite**    | `dist\LyricsFAG-Lite.exe`, `dist\LyricsFAG-GUI-Lite.exe`    | ~50 MB     | Да — при первом `--use-audio-analysis` скачивает Whisper (~150 MB) и Demucs (~84 MB)                            |
-| **portable**| `dist\LyricsFAG-Portable.exe`, `dist\LyricsFAG-GUI-Portable.exe` | ~600 MB | Нет — после пред-загрузки весов вспомогательными скриптами `.exe` работает полностью офлайн                       |
+| Вариант     | Выходные бинарники                                          | Размер        | Аудио-анализ                          | Сеть при первом запуске |
+|-------------|-------------------------------------------------------------|---------------|---------------------------------------|-------------------------|
+| **lite**    | `dist\LyricsFAG-Lite.exe`, `dist\LyricsFAG-GUI-Lite.exe`    | **~50 МБ**    | **Не поддерживается** (только LRCLIB + Genius) | Нет                      |
+| **portable**| `dist\LyricsFAG-Portable.exe`, `dist\LyricsFAG-GUI-Portable.exe` | **~3.5 ГБ** | Полный Whisper + Demucs + бандл весов | Нет — после пред-загрузки весов `.exe` работает полностью офлайн |
+
+> **Почему lite ~50 МБ, а portable ~3.5 ГБ?**
+> `demucs` 4.x тянет `torch` транзитивно (~4 ГБ на Windows).
+> PyInstaller `--onefile` бандлит всю Python-среду в .exe, поэтому
+> portable платит полную цену torch, а lite обходит её, просто
+> не ставя `requirements-audio.txt`.  См.
+> [requirements-audio.txt](requirements-audio.txt).
+
+> **Изменение поведения vs v1.1.2:** **lite** больше **не**
+> поддерживает локальный аудио-анализ. Пользователи, которые
+> включат "Use audio analysis" в lite GUI, получат чистый
+> `LyricsFailure` с подсказкой про portable-сборку.
 
 ### Команды сборки
 
@@ -381,7 +399,8 @@ LyricsFAG/
 │   ├── lyrics.py            # LRCLIB + Genius клиенты
 │   ├── lrc.py               # сериализатор LRC
 │   └── settings.py          # персистентные настройки GUI (JSON в %APPDATA%)
-├── requirements.txt
+├── requirements.txt         # основные зависимости (всегда ставятся)
+├── requirements-audio.txt   # опционально: Whisper + Demucs + torch
 ├── build.bat                # оркестратор: lite / portable / both
 ├── build-lite.bat           # ~50 MB-пара .exe (модели скачиваются при первом запуске)
 ├── build-portable.bat       # ~600 MB-пара .exe (веса вшиты)

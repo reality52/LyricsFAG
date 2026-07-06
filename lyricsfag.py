@@ -31,6 +31,7 @@ from lyricsfag_lib.audio import AudioFile, iter_audio_files  # noqa: E402
 from lyricsfag_lib.audio_analysis import (  # noqa: E402
     SUPPORTED_MODELS as _WHISPER_MODELS,
     describe_models_layout,
+    missing_audio_hint,
     warn_first_run_aggregate,
 )
 from lyricsfag_lib.device import resolve_device  # noqa: E402
@@ -181,7 +182,9 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Local audio transcription via faster-whisper as a 3rd fallback "
-            "(after LRCLIB + Genius). Requires `pip install faster-whisper`."
+            "(after LRCLIB + Genius). The lite build does not support "
+            "this; download the portable build, or `pip install -r "
+            "requirements-audio.txt` for dev runs."
         ),
     )
     p.add_argument(
@@ -599,8 +602,8 @@ def _build_audio_analyzer(args: argparse.Namespace):
         return None
     if not analyzer.enabled:
         LOG.warning(
-            "--use-audio-analysis set but faster-whisper is not installed. "
-            "Install with: pip install faster-whisper"
+            "--use-audio-analysis set but %s",
+            missing_audio_hint("faster-whisper"),
         )
         return None
     # Demucs on CPU is a 5–10x realtime trap; warn before committing to
