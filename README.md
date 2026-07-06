@@ -398,6 +398,41 @@ for the initial release).
 
 Detailed per-release notes live as `RELEASE_NOTES_X.Y.Z.md` at the repo root.
 
+### v1.1.0
+
+Audio-analysis contract change + new local-only `audio` source.
+
+- **Demucs is now mandatory** whenever the audio-analysis fallback is
+  enabled. The on/off `Demucs` combobox in the audio panel is gone —
+  the demucs vocal-isolation stage is always on with `--use-audio-analysis`
+  (or any GUI run that has the checkbox ticked). To skip the local
+  fallback entirely, uncheck `Use audio analysis` (GUI) or drop the
+  `--use-audio-analysis` flag (CLI). The `--no-demucs` CLI flag has been
+  removed; the demucs weights layout and the `htdemucs_ft` default are
+  unchanged.
+- **New `audio` source option** (GUI Source dropdown + CLI `--source audio`).
+  Skips LRCLIB / Genius entirely and goes straight to the local
+  Whisper + Demucs pipeline. Useful for fully-offline runs, large
+  karaoke/original-instrumental batches, or any time you explicitly
+  don't want network calls. In the GUI, picking `Source = audio` forces
+  the `Use audio analysis` checkbox on and greys it out so the chain
+  stays consistent.
+- **Filename-based short-circuit** for the audio branch. Tracks whose
+  filename (case- and punctuation-insensitive) contains
+  `instrumental`, `karaoke`, `off vocal`, `no vocal`, `minus one`,
+  `backing track`, etc. are never sent through Whisper. The
+  LRCLIB / Genius branches still try first (a karaoke file's
+  original is often a real song with real lyrics), and only the
+  audio-analysis branch is short-circuited.
+- **Backward compat:** v1.0.x `settings.json` files that contain the
+  now-removed `demucs` key are silently ignored instead of crashing
+  the GUI on launch (the previous code referenced a `self.demucs_var`
+  that no longer exists).
+- `lyricsfag_lib.__version__` is now `1.1.0`.
+
+See [`RELEASE_NOTES_1.1.0.md`](RELEASE_NOTES_1.1.0.md) for the full
+per-commit breakdown.
+
 ### v1.0.2
 
 Pre-release polish. No API changes.
@@ -406,7 +441,10 @@ Pre-release polish. No API changes.
   folder) opens `messagebox.showinfo(...)` with the LRCLIB → Genius →
   local-audio provider chain, the `GENIUS_ACCESS_TOKEN` /
   `--genius-token` hint, first-run Whisper / Demucs sizes, and a
-  `--dry-run` safety tip.
+  `--dry-run` safety tip. (v1.1.0 also added `Source = audio` as a way
+  to run only the local Whisper+Demucs branch — see the v1.1.0
+  release notes; the popup continues to describe the `Source = auto`
+  flow, which is unchanged.)
 - **GUI:** hover tooltips on every primary input widget (entries,
   checkbuttons, combos, buttons) — 500 ms hover delay, 8 s auto-dismiss.
 - **GUI:** completion popup — Done / Stopped / worker-crashed, with

@@ -213,17 +213,6 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument(
-        "--no-demucs",
-        dest="enable_demucs",
-        action="store_false",
-        default=True,
-        help=(
-            "Disable demucs vocal isolation; faster-whisper runs on the raw "
-            "audio mix instead. Demucs is enabled by default whenever the "
-            "package is importable."
-        ),
-    )
-    p.add_argument(
         "--dry-run",
         action="store_true",
         help="Print what would be done, write nothing.",
@@ -604,7 +593,6 @@ def _build_audio_analyzer(args: argparse.Namespace):
             if getattr(args, "audio_model_path", None)
             else None,
             device=getattr(args, "device", "auto"),
-            enable_demucs=getattr(args, "enable_demucs", True),
         )
     except Exception as exc:  # pragma: no cover - import-time hazard
         LOG.error("Audio analyser failed to initialise: %s", exc)
@@ -623,7 +611,7 @@ def _build_audio_analyzer(args: argparse.Namespace):
     ) == "cpu":
         LOG.warning(
             "Demucs vocal isolation on CPU is slow (~5-10x realtime per "
-            "song). For large batches, pass --no-demucs or --device cuda "
+            "song). For large batches, drop --use-audio-analysis or use --device cuda "
             "(requires an NVIDIA GPU)."
         )
     # Surface the on-disk layout so users can locate their weights
@@ -689,7 +677,24 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
         return 2
 
+    # Fail fast if the user explicitly asked for the audio-only chain
+    # but didn't enable the audio analyzer. Mirror of the genius+no-token
+    # check above; avoids the surprise of silently falling back to
+    # LRCLIB + Genius after a user explicitly typed ``--source audio``.
+    if args.source == "audio" and not args.use_audio_analysis:
+        LOG.error(
+            "--source audio requires --use-audio-analysis "
+            "(the local Whisper+Demucs pipeline is the only chain in that mode)."
+        )
+        return 2
+
     audio_analyzer = _build_audio_analyzer(args)
+    # Soft fallback ONLY if the user DID pass --use-audio-analysis but
+    # the analyzer failed to construct (e.g., faster-whisper not
+    # installed or the weights directory is missing). Falling back to
+    # 'auto' is reasonable here: the user clearly wanted some lyrics,
+    # and auto gives them LRCLIB + Genius without crashing the whole
+    # batch. The missing-flag case is the strict check above.
     if args.source == "audio" and audio_analyzer is None:
         LOG.warning(
             "--source audio requires a working audio analyser -- falling back to 'auto'."

@@ -256,7 +256,6 @@ class JobConfig:
     audio_model: str = "base"
     audio_model_path: Optional[Path] = None
     device: str = "auto"           # 'auto' / 'cuda' / 'cpu'
-    enable_demucs: bool = True     # on by default; user can dim via combobox
 
 
 def _count_files(root: Path, recursive: bool) -> int:
@@ -298,10 +297,13 @@ def _build_audio_analyzer(cfg: JobConfig, ui_queue: "queue.Queue"):
     # first-run network bandwidth (whisper + demucs).  Fires before
     # the analyzer is constructed so the user sees the cost up-front;
     # per-model WARNINGs from deeper in the stack still fire on first use.
+    # Demucs is now mandatory with the audio analysis fallback so the
+    # enable_demucs kwarg is hardcoded True; the user can only opt out
+    # of the whole pre-stage by unchecking "Use audio analysis".
     warn_first_run_aggregate(
         audio_model=cfg.audio_model,
         audio_model_path=cfg.audio_model_path,
-        enable_demucs=cfg.enable_demucs,
+        enable_demucs=True,
     )
     try:
         from lyricsfag_lib.audio_analysis import FasterWhisperAnalyzer
@@ -309,18 +311,18 @@ def _build_audio_analyzer(cfg: JobConfig, ui_queue: "queue.Queue"):
             model_size=cfg.audio_model,
             model_path=cfg.audio_model_path,
             device=cfg.device,
-            enable_demucs=cfg.enable_demucs,
         )
     except Exception as exc:  # pragma: no cover - import-time hazard
         LOG.error("Audio analyser failed to initialise: %s", exc)
         return None
 
     chosen_device = resolve_device(cfg.device)
-    if cfg.enable_demucs and chosen_device == "cpu":
+    if chosen_device == "cpu":
         LOG.warning(
             "Demucs vocal isolation on CPU is slow (~5-10x realtime per "
             "song). For large batches, switch the Device dropdown to "
-            "'auto'/'cuda' or set Demucs to 'off'."
+            "'auto'/'cuda' or uncheck 'Use audio analysis' to skip the "
+            "local fallback entirely."
         )
 
     # Single badge-builder call so startup + worker stay consistent.
@@ -556,6 +558,13 @@ class LyricsFAGApp(tk.Tk):
             opts, text="Use audio analysis (local)", variable=self.use_audio_var
         )
         self.use_audio_cb.pack(side="left")
+        # Source='audio' makes the Whisper+Demucs fallback the ONLY
+        # branch in the lyrics chain, so the master 'Use audio
+        # analysis' gate must be on. Auto-enable + grey out the
+        # checkbox on every source change (also covers the
+        # persisted-settings case where a prior launch left the
+        # checkbox unchecked while Source was 'audio').
+        self.source_var.trace_add("write", self._on_source_change)
 
         # Source row
         src = ttk.Frame(outer)
@@ -565,7 +574,7 @@ class LyricsFAGApp(tk.Tk):
         self.source_combo = ttk.Combobox(
             src,
             textvariable=self.source_var,
-            values=("auto", "lrclib", "genius"),
+            values=("auto", "lrclib", "genius", "audio"),
             state="readonly",
             width=10,
         )
@@ -618,19 +627,10 @@ class LyricsFAGApp(tk.Tk):
         )
         self.device_combo.grid(row=0, column=3, sticky="w")
 
-        self.demucs_label = ttk.Label(audio_row, text="Demucs:")
-        self.demucs_label.grid(
-            row=0, column=4, sticky="e", padx=(16, 6)
-        )
-        self.demucs_var = tk.StringVar(value="on")
-        self.demucs_combo = ttk.Combobox(
-            audio_row,
-            textvariable=self.demucs_var,
-            values=("on", "off"),
-            state="readonly",
-            width=8,
-        )
-        self.demucs_combo.grid(row=0, column=5, sticky="w")
+        # (demucs_label removed in v1.1.0 -- demucs is now mandatory)
+        # (demucs_label, demucs_var, demucs_combo widgets removed in
+        # v1.1.0 -- demucs is now mandatory with the audio analysis
+        # fallback, so the on/off combobox is gone)
 
         self.audio_model_path_label = ttk.Label(
             audio_row, text="Model path (optional):"
@@ -643,7 +643,7 @@ class LyricsFAGApp(tk.Tk):
             audio_row, textvariable=self.audio_model_path_var
         )
         self.audio_model_path_entry.grid(
-            row=1, column=1, columnspan=5, sticky="ew", pady=(6, 0)
+            row=1, column=1, columnspan=3, sticky="ew", pady=(6, 0)
         )
 
         # Buttons row
@@ -776,7 +776,9 @@ class LyricsFAGApp(tk.Tk):
             ),
             (
                 getattr(self, "use_audio_cb", None),
-                "Local transcription fallback.\n"
+                "Local Whisper+Demucs fallback.\n"
+                "Demucs vocal isolation is mandatory here;\n"
+                "no separate on/off toggle.\n"
                 "First run downloads Whisper (~150 MB)\n"
                 "and Demucs (~84 MB) into models/ near\n"
                 "this script if they aren't already.",
@@ -784,8 +786,10 @@ class LyricsFAGApp(tk.Tk):
             (
                 getattr(self, "source_combo", None),
                 "auto \u2192 LRCLIB first, then Genius, then local audio.\n"
-                "lrclib / genius \u2192 only that source.\n"
-                "audio \u2192 local Whisper only (skips web calls).",
+                                "lrclib / genius \u2192 only that provider.\n"
+                "The audio fallback still applies if 'Use audio analysis' is on.\n"
+                "audio \u2192 local Whisper+Demucs only (skips web calls).\n"
+                "Selecting 'audio' forces 'Use audio analysis' on.",
             ),
             (
                 getattr(self, "genius_entry", None),
@@ -803,13 +807,6 @@ class LyricsFAGApp(tk.Tk):
                 "auto \u2192 CUDA if available, else CPU.\n"
                 "cuda is ~20x faster on supported GPUs.\n"
                 "Demucs on CPU is slow (~5-10x realtime).",
-            ),
-            (
-                getattr(self, "demucs_combo", None),
-                "Vocal isolation pre-stage.\n"
-                "OFF = Whisper runs on the raw stereo mix.\n"
-                "ON  = cleaner lyrics on dense songs,\n"
-                "       +84 MB weights (htdemucs_ft).",
             ),
             (
                 getattr(self, "audio_model_path_entry", None),
@@ -1002,8 +999,6 @@ class LyricsFAGApp(tk.Tk):
             self.audio_model_path_var.set(loaded["audio_model_path"])
         if "device" in loaded:
             self.device_choice_var.set(loaded["device"])
-        if "demucs" in loaded:
-            self.demucs_var.set(loaded["demucs"])
 
     def _save_settings_snapshot(self) -> None:
         """Persist current widget values; never raises -- log on failure.
@@ -1028,7 +1023,6 @@ class LyricsFAGApp(tk.Tk):
                     "audio_model": self.audio_model_var.get(),
                     "audio_model_path": self.audio_model_path_var.get(),
                     "device": self.device_choice_var.get(),
-                    "demucs": self.demucs_var.get(),
                 }
             )
             LOG.debug("Saved settings to %s", settings_path())
@@ -1036,6 +1030,27 @@ class LyricsFAGApp(tk.Tk):
             LOG.warning("Could not save settings to %s: %s", settings_path(), exc)
 
     # -- event handlers -----------------------------------------------------
+
+    def _on_source_change(self, *_args) -> None:
+        """Grey out the Use audio analysis checkbox while Source='audio'.
+
+        ``Source='audio'`` makes the local Whisper+Demucs fallback
+        the only branch in the lyrics chain, so the master "Use audio
+        analysis" gate must be on. We force-set it AND disable the
+        checkbox (so the user can't flip it off while Source is
+        still 'audio') rather than just disabling, to also handle the
+        persisted-settings case where a prior launch left the
+        checkbox unchecked with Source='audio'. For any other source
+        value we re-enable the checkbox (its value is left alone --
+        the user can still keep audio analysis on alongside
+        'auto' / 'lrclib' / 'genius' and the fetcher will simply
+        append the audio branch to the chain).
+        """
+        if self.source_var.get() == "audio":
+            self.use_audio_var.set(True)
+            self.use_audio_cb.configure(state="disabled")
+        else:
+            self.use_audio_cb.configure(state="normal")
 
     def _on_browse(self) -> None:
         initial = self.folder_var.get().strip() or self._last_folder
@@ -1083,7 +1098,6 @@ class LyricsFAGApp(tk.Tk):
             audio_model=self.audio_model_var.get(),
             audio_model_path=audio_model_path,
             device=self.device_choice_var.get(),
-            enable_demucs=(self.demucs_var.get() == "on"),
         )
 
         # Manual CUDA override without hardware -> fall back to CPU here so

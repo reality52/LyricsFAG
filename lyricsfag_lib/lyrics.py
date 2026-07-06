@@ -15,6 +15,7 @@ import threading
 from dataclasses import dataclass, field
 from typing import Iterable, Optional
 
+import re
 import requests
 
 try:
@@ -365,7 +366,13 @@ class GeniusClient:
 
 class LyricsFetcher:
     """Source-aware fetcher.  ``source`` is one of:
-        ``"auto"`` (LRCLIB then Genius), ``"lrclib"``, ``"genius"``.
+        ``"auto"`` (LRCLIB then Genius, then audio if enabled),
+        ``"lrclib"`` / ``"genius"`` (only that provider for the
+        LRCLIB/Genius stage, but the audio fallback still applies
+        when the analyzer is enabled),
+        ``"audio"`` (local Whisper+Demucs only; requires the audio
+        analyzer to be enabled via ``--use-audio-analysis`` or the
+        GUI's 'Use audio analysis' checkbox).
     """
 
     def __init__(
@@ -395,6 +402,55 @@ class LyricsFetcher:
         t = (audio.title or "").lower()
         return "instrumental" in t or "(karaoke)" in t
 
+    # Substrings in the *filename* (case-insensitive, punctuation/whitespace
+    # normalised) that mark a track as an instrumental / karaoke / backing-
+    # track version.  We deliberately only short-circuit the LOCAL audio
+    # analysis branch on a match -- LRCLIB + Genius still get a chance to
+    # return the original song's lyrics, since ``"Song (Off Vocal).flac"``
+    # is often a faithful cover of a real song that LRCLIB knows.
+    # Note this is a filename check, not a title check (the title-based
+    # short-circuit in :meth:`_looks_instrumental` is unrelated and stays).
+    _INSTRUMENTAL_FILENAME_PATTERNS: tuple[str, ...] = (
+        "backing track",
+        "inst version",
+        "instrumental",
+        "instrumental version",
+        "karaoke",
+        "minus one",
+        "no vocal",
+        "no vocals",
+        "off vocal",
+        "vocal removed",
+        "vocals removed",
+    )
+    # Compiled once: a single anchored substring search is cheaper than 11
+    # separate ``in`` checks on every audio file in a 300-track batch. The
+    # outer ``(?:^|[\\s\\-_.])`` / ``(?:$|[\\s\\-_.])`` pair means a match
+    # has to start AND end at a word/punctuation boundary -- ``"instrument"``
+    # doesn't trigger ``"instrumental"``, and ``"tracklist"`` doesn't trigger
+    # ``"backing track"``.
+    _INSTRUMENTAL_FILENAME_RE = re.compile(
+        r"(?:^|[\s\-_.])("
+        + "|".join(re.escape(p) for p in _INSTRUMENTAL_FILENAME_PATTERNS)
+        + r")(?:$|[\s\-_.])",
+        re.IGNORECASE,
+    )
+
+    @staticmethod
+    def _filename_blocks_audio(audio: AudioFile) -> bool:
+        """True if ``audio.path`` looks like an instrumental/karaoke version.
+
+        Normalises the stem (lowercase, collapses ``-`` / ``_`` / ``.`` /
+        ``\\`` and runs of whitespace into a single space) so
+        ``"Song-Off-Vocal.flac"``, ``"song_off_vocal.flac"`` and
+        ``"song off vocal.flac"`` all match the same pattern. Used to
+        short-circuit the audio-analysis branch in :meth:`fetch`; the
+        LRCLIB / Genius branches are untouched so a karaoke file whose
+        original has real lyrics still gets an LRC.
+        """
+        name = re.sub(r"[\s\-_.]+", " ", audio.path.stem.lower()).strip()
+        return bool(LyricsFetcher._INSTRUMENTAL_FILENAME_RE.search(name))
+
     def fetch(self, audio: AudioFile) -> LyricsResult | LyricsFailure:
         if self._looks_instrumental(audio):
             return LyricsResult(
@@ -416,7 +472,22 @@ class LyricsFetcher:
                 ["audio"] if self.audio_analyzer is not None else []
             )
         elif self.source == "audio":
-            order = ["audio"] if self.audio_analyzer is not None else []
+            # Source='audio' is the local-only chain: a missing or
+            # disabled audio analyzer (CLI user forgot
+            # ``--use-audio-analysis``, OR faster-whisper failed to
+            # construct / isn't installed) would otherwise leave the
+            # order list empty and trip the ``assert last is not None``
+            # below -- crashing the worker mid-batch. Short-circuit to
+            # a clean LyricsFailure so the run finishes normally with
+            # a ``missing`` outcome (the per-file line in the log
+            # panel / summary explains why).
+            if self.audio_analyzer is None or not self.audio_analyzer.enabled:
+                return LyricsFailure(
+                    "audio",
+                    "source='audio' requires --use-audio-analysis "
+                    "(audio analyzer unavailable)",
+                )
+            order = ["audio"]
         else:
             return LyricsFailure("config", f"unknown source {self.source!r}")
 
@@ -439,6 +510,25 @@ class LyricsFetcher:
                     last = LyricsFailure(
                         self.audio_analyzer.name if self.audio_analyzer else "audio",
                         "audio analyzer disabled / not installed",
+                    )
+                    continue
+                # Filename-based short-circuit: never run Whisper on a
+                # track that the user clearly named as instrumental /
+                # karaoke / off-vocal. The LRCLIB + Genius branches
+                # above are NOT gated by this check on purpose -- those
+                # providers index the original song and often return
+                # usable lyrics even when the local file is a cover /
+                # backing track.
+                if self._filename_blocks_audio(audio):
+                    last = LyricsFailure(
+                        "audio",
+                        "filename matches karaoke/instrumental pattern; "
+                        "audio analysis skipped",
+                    )
+                    LOG.info(
+                        "Skipping audio analysis for %s: filename matches "
+                        "karaoke/instrumental pattern",
+                        audio.path.name,
                     )
                     continue
                 r = self.audio_analyzer.get(audio, stop_event=self.cancel_event)

@@ -140,11 +140,10 @@ def warn_first_run_aggregate(
     Calls :func:`planned_first_run_download` to compute the plan, then
     renders one WARNING line like::
 
-        First run will download ~570 MB total (whisper-base ~150 MB +
-        htdemucs ~420 MB) from the network. Subsequent runs use the
-        cached weights. Use --audio-model-path, --no-demucs, or
-        pre-populate ~/.cache/torch/hub/checkpoints/*.th to skip one
-        or both.
+        First run will download ~234 MB total (whisper-base ~150 MB +
+        htdemucs_ft ~84 MB) from the network. Subsequent runs use the
+        cached weights. Use --audio-model-path or pre-populate
+        ~/.cache/torch/hub/checkpoints/*.th to skip one or both.
 
     Skips the WARNING entirely when ``total_mb == 0`` so subsequent
     runs (whose caches are warm) stay quiet.  Returns the same plan
@@ -181,9 +180,9 @@ def warn_first_run_aggregate(
         )
     LOG.warning(
         "First run will download ~%d MB total (%s) from the network. "
-        "Subsequent runs use the cached weights. Use --audio-model-path, "
-        "--no-demucs, or pre-populate ~/.cache/torch/hub/checkpoints/*.th "
-        "to skip one or both downloads.",
+        "Subsequent runs use the cached weights. Use --audio-model-path "
+        "or pre-populate ~/.cache/torch/hub/checkpoints/*.th to skip one "
+        "or both downloads.",
         total_mb, " + ".join(parts),
     )
     return will_w, will_d, total_mb
@@ -642,15 +641,19 @@ class DemucsIsolator:
                     "facebookresearch/demucs (~%d MB, approximate; "
                     "%s) on first use; "
                     "subsequent runs use the cached weights at "
-                    "%s. Pass --no-demucs to skip this heavy "
-                    "vocal-isolation pre-stage.",
+                    "%s. Disable the audio analysis fallback (uncheck "
+                    "'Use audio analysis' in the GUI / drop "
+                    "--use-audio-analysis from the CLI) to skip this "
+                    "heavy vocal-isolation pre-stage.",
                     self.model_name, _mb, _shape_note, _native_cache,
                 )
             else:
                 LOG.warning(
                     "Demucs: downloading model='%s' (%s) from "
-                    "facebookresearch/demucs on first use; pass "
-                    "--no-demucs to skip this heavy vocal-isolation "
+                    "facebookresearch/demucs on first use; disable the "
+                    "audio analysis fallback (uncheck 'Use audio "
+                    "analysis' in the GUI / drop --use-audio-analysis "
+                    "from the CLI) to skip this heavy vocal-isolation "
                     "pre-stage.",
                     self.model_name, _shape_note,
                 )
