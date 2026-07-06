@@ -558,6 +558,19 @@ class LyricsFAGApp(tk.Tk):
             opts, text="Use audio analysis (local)", variable=self.use_audio_var
         )
         self.use_audio_cb.pack(side="left")
+        # The 'Use audio analysis' checkbox is auto-enabled / greyed
+        # out by ``_on_source_change`` once ``source_var`` is wired up;
+        # the ``trace_add`` call lives below the source row (after the
+        # StringVar + Combobox are constructed). Wiring it here used
+        # to crash the GUI on launch with
+        # ``AttributeError: 'LyricsFAGApp' object has no attribute
+        # 'source_var'``.
+
+        # Source row
+        src = ttk.Frame(outer)
+        src.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(0, 6))
+        ttk.Label(src, text="Source:").pack(side="left", padx=(0, 6))
+        self.source_var = tk.StringVar(value="auto")
         # Source='audio' makes the Whisper+Demucs fallback the ONLY
         # branch in the lyrics chain, so the master 'Use audio
         # analysis' gate must be on. Auto-enable + grey out the
@@ -565,12 +578,6 @@ class LyricsFAGApp(tk.Tk):
         # persisted-settings case where a prior launch left the
         # checkbox unchecked while Source was 'audio').
         self.source_var.trace_add("write", self._on_source_change)
-
-        # Source row
-        src = ttk.Frame(outer)
-        src.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(0, 6))
-        ttk.Label(src, text="Source:").pack(side="left", padx=(0, 6))
-        self.source_var = tk.StringVar(value="auto")
         self.source_combo = ttk.Combobox(
             src,
             textvariable=self.source_var,
