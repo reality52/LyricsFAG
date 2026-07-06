@@ -1,0 +1,38 @@
+# Python ---------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging ----------------------------------------------------
+build/
+dist/
+*.spec
+*.egg-info/
+
+# Logs & pipeline junk -------------------------------------------------------
+*.log
+/nul
+
+# Heavy model weights (README documents fetching via scripts/) --------------
+/models/whisper-base/
+/models/demucs/*
+
+# Bundle demucs README so first-time users still see how to seed weights.
+!/models/demucs/README.md
+
+# Local test album (10 FLACs) -----------------------------------------------
+/test/
+
+# Local secrets (the user keeps their Genius key OUTSIDE the repo, e.g. -------
+#  ../LyricsFAG-secrets/genniuskey.txt — LyricsFAG already reads the token
+#  from the GENIUS_ACCESS_TOKEN env var instead of any tracked file).
+genniuskey.txt
+.env
+secret*.txt
+
+# IDE / OS noise -------------------------------------------------------------
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

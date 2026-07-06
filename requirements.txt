@@ -1,0 +1,19 @@
+# Core lyrics chain (always installed).
+mutagen>=1.47
+requests>=2.31
+lyricsgenius>=3.0
+
+# Local audio-analysis fallback (faster-whisper is soft-pinned: the analyzer
+# still detects a missing install and surfaces a LyricsFailure).  The
+# download script in scripts/download_whisper_model.py fetches the matching
+# checkpoint for the default "base" size on first use.
+faster-whisper>=1.0
+
+# Optional vocal-isolation pre-stage.  Pipeline falls back to raw audio when
+# demucs isn't importable.
+demucs>=4.0
+
+# Defensive fallback for Demucs → Whisper sample-rate conversion when
+# torchaudio isn't available (demucs v4 normally ships it as a dependency,
+# but we keep scipy in there as a numeric polyphase backup).
+scipy>=1.10
