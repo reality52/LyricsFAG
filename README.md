@@ -19,8 +19,9 @@ reads audio tags, and writes matching `.lrc` files next to each track.
 It pulls [LRC] data from **[LRCLIB.net]** (free, no auth, returns synced
 lyrics whenever possible) and falls back to **[Genius]** (huge database,
 plain text) when LRCLIB has nothing or you supply a Genius token.
-If it cant find lyrics in those sources it will try to generate new .lrc file with the help of demucs and whisper. 
-It can do it either with cuda capable GPU or just with CPU (significally slower)
+If neither source has lyrics for a track, it will try to generate a
+`.lrc` file locally with the help of [Demucs] and [Whisper]. It can run
+on a CUDA-capable GPU or fall back to CPU (notably slower).
 
 Supports the following audio formats (anything `mutagen` can read):
 `FLAC`, `MP3`, `M4A/MP4`, `AAC`, `OGG`, `OPUS`, `WMA`, `WAV`, `APE`, `WV`,
@@ -29,6 +30,8 @@ Supports the following audio formats (anything `mutagen` can read):
 [LRC]: https://en.wikipedia.org/wiki/LRC_(file_format)
 [LRCLIB.net]: https://lrclib.net/
 [Genius]: https://genius.com/
+[Demucs]: https://github.com/facebookresearch/demucs
+[Whisper]: https://github.com/SYSTRAN/faster-whisper
 
 
 ## Quick start (Windows)
@@ -383,6 +386,18 @@ for the initial release).
 
 ## License & credits
 
-- LRCLIB.net — free public lyrics API.
-- lyricsgenius — MIT, used for Genius integration.
-- mutagen — GPLv2, used for tag reading.
+This project is licensed under MIT — see [LICENSE](LICENSE).
+
+Upstream services and libraries that make LyricsFAG work:
+
+- [LRCLIB.net](https://lrclib.net/) — free public lyrics API.
+- [Genius](https://genius.com/) — lyrics database (requires your own free token).
+- [lyricsgenius](https://github.com/johnwmillr/lyricsgenius) — MIT, used for Genius integration.
+- [mutagen](https://github.com/quodlibet/mutagen) — GPLv2, used for reading audio tags.
+- [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — MIT, optional local audio transcription.
+- [Demucs](https://github.com/facebookresearch/demucs) — MIT, optional vocal isolation in front of Whisper.
+
+This codebase was written with substantial help from an AI coding
+assistant ([Codebuff](https://codebuff.com), model `minimax/minimax-m3`)
+under human direction and review; see the AI-assisted note at the top
+of this README for the full disclaimer.
