@@ -163,13 +163,29 @@ def parse_audio(path: Path) -> AudioFile:
 
 
 def _first_tag(tags, key: str) -> str:
-    """Return the first string value for ``key`` regardless of tag flavour."""
+    """Return the first string value for ``key`` regardless of tag flavour.
+
+    ``mutagen._vorbis.VorbisComment.__getitem__`` raises :class:`ValueError`
+    (NOT :class:`KeyError`) for missing / malformed keys -- a real-world
+    case that hit us when scanning an OGG file with no Vorbis comments at
+    all or with one of the probe keys spelled/labelled unexpectedly (the
+    worker crashed mid-iteration with ``ValueError`` leaking out of
+    ``__getitem__`` and tore down the whole batch).  ID3 / APEv2 / MP4
+    tags use :class:`KeyError` instead; ``TypeError`` covers the case
+    where ``tags`` is ``None`` or has been coerced into a plain ``dict``
+    that swallows nonsensical lookups.  Catch all three so a single
+    badly-tagged file can't poison the whole scan.
+    """
     try:
         value = tags[key]
-    except (KeyError, TypeError):
+    except (KeyError, TypeError, ValueError):
         return ""
     # mutagen returns list[str] (vorbis/APEv2) or ``mutagen.id3._TextFrame``
-    # (ID3).  Handle both.
+    # (ID3).  Handle both.  The ``value.text`` branch below is ID3-only --
+    # vorbis/APEv2 values are plain ``list[str]`` and never get here --
+    # so its ``except`` clause stays narrow at ``(IndexError, TypeError)``
+    # (the realistic failure modes for ``list[str][0]``).  Widening it
+    # would be unused coverage and a misleading comment.
     if isinstance(value, list):
         if not value:
             return ""
