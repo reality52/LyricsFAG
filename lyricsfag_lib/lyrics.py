@@ -399,8 +399,25 @@ class LyricsFetcher:
 
     @staticmethod
     def _looks_instrumental(audio: AudioFile) -> bool:
-        t = (audio.title or "").lower()
-        return "instrumental" in t or "(karaoke)" in t
+        """True if ``audio.title`` looks like an instrumental / karaoke version.
+
+        Word-bounded regex (mirrors :meth:`_filename_blocks_audio`) so a
+        title like ``Song (Instrumental)`` or ``Song [Karaoke]`` short-
+        circuits the lyrics chain (correctly) but a title like
+        ``Instrumentalist rock song`` does NOT -- the substring
+        ``"instrumental"`` is followed by ``"i"`` (a letter), so the
+        new boundary check refuses to call it instrumental.  Also
+        picks up Cyrillic titles like ``Песня (Инструментал)``: the old
+        ASCII-only plain-substring check missed those because the
+        vocabulary it tested had no Cyrillic entries at all and the
+        ``"(karaoke)" in t`` substring is also ASCII-only.  The full
+        vocabulary (English + Russian + the belt-and-suspenders
+        CamelCase variants) is shared with the FILENAME check via
+        :data:`_INSTRUMENTAL_FILENAME_PATTERNS` so the two short-
+        circuits agree on what counts as instrumental.
+        """
+        title = audio.title or ""
+        return bool(LyricsFetcher._INSTRUMENTAL_TITLE_RE.search(title))
 
     # Substrings in the *filename* (case-insensitive, punctuation/whitespace
     # normalised) that mark a track as an instrumental / karaoke / backing-
@@ -464,6 +481,28 @@ class LyricsFetcher:
         re.IGNORECASE,
     )
 
+    # Compiled word-bounded regex used by :meth:`_looks_instrumental`
+    # to short-circuit the lyrics chain for tracks whose ID3 / Vorbis
+    # title tag indicates an instrumental / karaoke version.  Bound
+    # to :data:`_INSTRUMENTAL_FILENAME_PATTERNS` (same vocabulary as
+    # the filename short-circuit -- including the Cyrillic entries
+    # ``инструментал``, ``караоке``, ``минусовка``, ``без вокала``,
+    # ``акапелла``) so the title and filename heuristics stay in
+    # sync.  The boundary class expands on the FILENAME regex
+    # (``[\s\-_.]``) with title-richer punctuation so bracketed /
+    # parenthesised markers like ``(Instrumental)`` and
+    # ``[Karaoke]``, plus comma / semicolon / colon separators
+    # common in multi-artist titles, still match: titles don't have
+    # the CamelCase concerns that filenames do (ID3 / Vorbis tags
+    # reliably store the spaces directly), so no equivalent of
+    # :meth:`_filename_blocks_audio`'s CamelCase split is needed.
+    _INSTRUMENTAL_TITLE_RE = re.compile(
+        r"(?:^|[\s\-_.,;:()\[\]])("
+        + "|".join(re.escape(p) for p in _INSTRUMENTAL_FILENAME_PATTERNS)
+        + r")(?:$|[\s\-_.,;:()\[\]])",
+        re.IGNORECASE,
+    )
+
     @staticmethod
     def _filename_blocks_audio(audio: AudioFile) -> bool:
         """True if ``audio.path`` looks like an instrumental/karaoke version.
@@ -508,16 +547,20 @@ class LyricsFetcher:
         return bool(LyricsFetcher._INSTRUMENTAL_FILENAME_RE.search(name))
 
     def fetch(self, audio: AudioFile) -> LyricsResult | LyricsFailure:
-        if self._looks_instrumental(audio):
-            return LyricsResult(
-                provider="heuristic",
-                title=audio.title,
-                artist=audio.artist,
-                album=audio.album,
-                length_seconds=audio.duration,
-                plain_text="[Instrumental]",
-                instrumental=True,
-            )
+        # NOTE: The instrumental title-tag short-circuit lives in
+        # :func:`lyricsfag.process_one` (which uses
+        # :meth:`_looks_instrumental` and returns
+        # :data:`STATUS_SKIPPED_INSTRUMENTAL`), NOT here -- so this
+        # ``fetch`` stays focused on the LRCLIB / Genius / audio
+        # provider chain.  The pre-flight skip writes no LRC at all
+        # (the previous stub ``[Instrumental]`` LyricsResult was
+        # misleading because some audio players render its content as
+        # real lyrics), keeps ``failed`` uncounted, and keeps ``main``'s
+        # exit code at 0 on runs where every track is instrumental.
+        # Direct callers of :meth:`fetch` who want the same semantics
+        # should call :meth:`_looks_instrumental` themselves; this
+        # method is intentionally minimal so it remains a clean
+        # ``LyricsResult | LyricsFailure`` union from the caller's POV.
 
         if self.source == "auto":
             order = ["lrclib", "genius"]
