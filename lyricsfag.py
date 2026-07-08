@@ -582,20 +582,18 @@ def _build_audio_analyzer(args: argparse.Namespace):
     # analyzer is constructed so the user sees the cost up-front; the
     # per-model WARNINGs from deeper in the stack still fire on first use.
     warn_first_run_aggregate(
-        audio_model=getattr(args, "audio_model", "base"),
+        audio_model=args.audio_model,
         audio_model_path=Path(args.audio_model_path).expanduser().resolve()
-        if getattr(args, "audio_model_path", None)
-        else None,
-        enable_demucs=getattr(args, "enable_demucs", True),
+        if args.audio_model_path else None,
+        enable_demucs=True,  # demucs is mandatory as of v1.1.0; knob was removed
     )
     try:
         from lyricsfag_lib.audio_analysis import FasterWhisperAnalyzer
         analyzer = FasterWhisperAnalyzer(
-            model_size=getattr(args, "audio_model", "base"),
+            model_size=args.audio_model,
             model_path=Path(args.audio_model_path).expanduser().resolve()
-            if getattr(args, "audio_model_path", None)
-            else None,
-            device=getattr(args, "device", "auto"),
+            if args.audio_model_path else None,
+            device=args.device,
         )
     except Exception as exc:  # pragma: no cover - import-time hazard
         LOG.error("Audio analyser failed to initialise: %s", exc)
@@ -609,9 +607,9 @@ def _build_audio_analyzer(args: argparse.Namespace):
     # Demucs on CPU is a 5–10x realtime trap; warn before committing to
     # a potentially 25+ hour batch. The `--device cuda` override is also
     # documented here so the user sees both opt-outs in one line.
-    if getattr(args, "enable_demucs", True) and resolve_device(
-        getattr(args, "device", "auto")
-    ) == "cpu":
+    # Demucs is mandatory as of v1.1.0 (the user can only opt out of the
+    # whole pre-stage by unchecking "Use audio analysis").
+    if resolve_device(args.device) == "cpu":
         LOG.warning(
             "Demucs vocal isolation on CPU is slow (~5-10x realtime per "
             "song). For large batches, drop --use-audio-analysis or use --device cuda "
@@ -623,10 +621,9 @@ def _build_audio_analyzer(args: argparse.Namespace):
     # always concrete but only consumed when its ``.th`` files are
     # already seeded (otherwise it falls back to ``~/.cache/torch/hub``).
     _whisper_repo, _demucs_repo = describe_models_layout(
-        audio_model=getattr(args, "audio_model", "base"),
+        audio_model=args.audio_model,
         audio_model_path=Path(args.audio_model_path).expanduser().resolve()
-        if getattr(args, "audio_model_path", None)
-        else None,
+        if args.audio_model_path else None,
     )
     LOG.info(
         "Audio-analysis weights path layout:\n"

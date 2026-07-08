@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import Iterable, Optional
 
 import re
+from itertools import islice
 import requests
 
 try:
@@ -302,6 +303,183 @@ class LRCLIBClient:
 # ---------------------------------------------------------------------------
 
 
+# Detect Genius "list/index" wiki pages that come back from
+# ``lyricsgenius.search_song`` when the user's audio tags happen to match
+# a wiki article rather than an actual song (real example observed:
+# ``"List of Virtual YouTubers (VTubers)"`` by ``"Genius Japan"`` matched
+# an audio file whose tags resolved to that page; the resulting .lrc was
+# ~2200 lines of `Name / JapaneseName (ProductionGroup)` entries).
+#
+# The detector uses two *binary* signals -- no density thresholds --
+# because density-based heuristics have repeatedly false-positived on
+# legitimate rap/feature-heavy tracks.  The signals are:
+#
+# 1. **Alphabet navigation header**: Genius table-of-contents / alphabetical
+#    indexes render as many adjacent single-character (or single-symbol)
+#    lines at the very top of the page body.  No real song lyric body
+#    starts with this pattern; the worst case would be a song that quotes
+#    the alphabet in a verse, which uses ``A, B, C, D`` on a single line
+#    rather than 26 separate single-character lines.
+#
+# 2. **Long-body cap**: a hard ceiling on the number of LF characters
+#    (cheap O(N) ``count`` -- good enough since ``lyricsgenius`` returns
+#    LF- or CRLF-normalised text).  Bumped to 1000 after review so a
+#    labelled-section-heavy long song (``Rap God`` ~300 lines in
+#    ``lyricsgenius``' output) stays comfortably below the threshold.
+_GENIUS_INDEX_HEAD_LEN = 30
+_GENIUS_INDEX_HEAD_MIN_SINGLE_CHARS = 8
+_GENIUS_INDEX_MAX_LINES = 1000
+
+
+# Reject Genius "wrong song" auto-corrects: even after the index-page
+# filter above, Genius will happily return a popular song whose
+# title/artist *partially* match the query when the user actually
+# wanted a different (less popular) one.  Token-set Overlap Coefficient
+# ``|A ∩ B| / min(|A|, |B|)`` is the right metric here -- Jaccard
+# penalises subset matches like ``{beatles} ⊆ {the, beatles}``, but
+# Overlap Coefficient forgives them (returns 1.0).  The same forgiving
+# behaviour handles ``(Acoustic)``, ``feat. X``, ``- Remastered 2009``,
+# ``(Live at Wembley)``, etc. when query tokens are a subset of the
+# response tokens, while still rejecting genuinely different songs.
+#
+# Common release-variant markers are dropped at tokenisation so they do
+# not inflate the smaller set and unfairly fail real matches.  They
+# matter to a listener looking for a specific release but do NOT
+# change song identity for "give me the lyrics" use case.
+_GENIUS_MATCH_THRESHOLD = 0.5
+_GENIUS_MATCH_STOPWORDS = frozenset({
+    # English articles + prepositions.  Drop "the" so ``The Beatles``
+    # tokens as just ``{beatles}`` (forgiving for non-The query), and
+    # drop "in"/"of"/"on"/"at"/"from" so venue/positional suffixes like
+    # ``"Live in Concert"`` / ``"From the Inside"`` don't inflate the
+    # smaller overlap set and false-pass a wrong-song query.
+    "the", "a", "an", "in", "of", "on", "at", "from",
+    # Featured-artist markers
+    "feat", "ft", "featuring", "with",
+    # Release-variant markers -- irrelevant to song identity for lyrics use
+    "remastered", "remaster", "remasterisation", "remasterization",
+    "live", "acoustic", "unplugged", "radio", "edit", "edition",
+    "version", "remix", "mix", "demo", "take",
+    # Misc noise seen on Genius album pages
+    "original", "single", "album", "ost",
+})
+
+
+def _genius_match_tokens(text: str) -> set[str]:
+    """Tokenise ``text`` for the song-mismatch overlap check.
+
+    All non-alphanumerics become spaces so ``Yesterday (Acoustic)``,
+    ``Yesterday-Remastered``, and ``Yesterday feat. X`` all tokenise
+    consistently (``yesterday``, ``yesterday``, ``yesterday`` / ``x``
+    respectively).  Empty input returns an empty set so the caller can
+    distinguish "no title given" from "title with no real words".
+    """
+    if not text:
+        return set()
+    cleaned = re.sub(r"[^\w\s]+", " ", text, flags=re.UNICODE).lower()
+    # ``"".split()`` never returns empty strings; the ``in`` membership
+    # test against the stopword frozenset handles token filtering.
+    return {tok for tok in cleaned.split() if tok not in _GENIUS_MATCH_STOPWORDS}
+
+
+def _overlap_coef(a: set[str], b: set[str]) -> float:
+    """Token-set Overlap Coefficient: ``|A \u2229 B| / min(|A|, |B|)``.
+
+    Returns ``1.0`` if both sets are empty (vacuously identical) and
+    ``0.0`` if only one is empty (a non-empty query against an empty
+    response is a degenerate match -- we reject it so the user gets a
+    diagnostic instead of silently auto-corrected lyrics).
+    """
+    if not a and not b:
+        return 1.0
+    if not a or not b:
+        return 0.0
+    return len(a & b) / min(len(a), len(b))
+
+
+def _is_genius_match(
+    q_title: str, q_artist: str, r_title: str, r_artist: str,
+) -> tuple[bool, str]:
+    """``(is_match, diagnostic)`` -- verify Genius returned the song the user asked for.
+
+    Returns ``(True, "")`` when title AND artist overlap (each >=) the
+    threshold; otherwise a diagnostic that names both the query and the
+    response so the user can fix their tags without re-running.
+
+    Used by :meth:`GeniusClient.get` after the index-page filter.  Not
+    requiring exact equality -- the Overlap Coefficient forgives the
+    usual surface variants (``The Beatles`` vs ``Beatles``,
+    ``feat. X``, ``(Remastered 2009)``, etc.) so a real match in a
+    different release still goes through, but a wholly different
+    popular song that share one common word with the query is rejected.
+    """
+    q_t = _genius_match_tokens(q_title)
+    q_a = _genius_match_tokens(q_artist)
+    r_t = _genius_match_tokens(r_title)
+    r_a = _genius_match_tokens(r_artist)
+    title_overlap = _overlap_coef(q_t, r_t)
+    artist_overlap = _overlap_coef(q_a, r_a)
+    if (
+        title_overlap >= _GENIUS_MATCH_THRESHOLD
+        and artist_overlap >= _GENIUS_MATCH_THRESHOLD
+    ):
+        return True, ""
+    return False, (
+        f"query '{q_title}' by '{q_artist}' != response "
+        f"'{r_title}' by '{r_artist}' "
+        f"(title={title_overlap:.2f}, artist={artist_overlap:.2f})"
+    )
+
+
+def _classify_genius_text(text: str) -> tuple[bool, str]:
+    """``(is_index, why)`` -- detect Genius wiki/list pages and name the signal.
+
+    Used by :meth:`GeniusClient.get` to reject obvious misclassifications
+    so the lyrics chain can fall through to the next provider instead of
+    writing a useless .lrc.  Two binary signals (no density thresholds)
+    guard against false positives on legitimate rap/feature-heavy
+    tracks:
+
+    * **alphabet-navigation header** -- Genius table-of-contents /
+      alphabetical indexes render as many adjacent single-character
+      lines at the very top of the page body (``A\n|\nB\n|\nC\n|...``).
+      No real song lyric body starts with this pattern.  ``isascii()
+      and isalpha()`` is intentionally stricter than ``isalnum()`` so a
+      poetic song that legitimately opens with one CJK ideograph per
+      line cannot trip the threshold.
+    * **long-body cap** -- a hard ceiling on LF count
+      (``text.count("\\n")``).  Lyricsgenius returns LF- or
+      CRLF-normalised text so this is reliable on both; it
+      under-counts only degenerate CR-only files which lyricsgenius
+      never produces.
+
+    The ``why`` return value names which signal fired so the failure
+    reason in :class:`LyricsFailure` is actionable in the GUI log
+    panel (header mismatched tag fix; long body mismatched query fix).
+    """
+    # Signal 1: alphabet-navigation header.  Sample the first
+    # ``_GENIUS_INDEX_HEAD_LEN`` non-blank lines; the ``islice`` cap
+    # is mostly cosmetic -- ``splitlines()`` already walks the body --
+    # but it makes the early-exit obvious to readers.
+    head = list(islice(
+        (l.strip() for l in text.splitlines() if l.strip()),
+        _GENIUS_INDEX_HEAD_LEN,
+    ))
+    if len(head) >= 10:
+        single_ascii_alpha = sum(
+            1 for l in head if len(l) == 1 and l.isascii() and l.isalpha()
+        )
+        if single_ascii_alpha >= _GENIUS_INDEX_HEAD_MIN_SINGLE_CHARS:
+            return True, "alphabet-navigation header detected"
+    # Signal 2: long-body cap.  Wiki articles, transcripts, and book
+    # chapters routinely exceed 1000 lines; even the longest songs in
+    # any language + any section-marker style stay several hundred short.
+    line_count = text.count("\n")
+    if line_count > _GENIUS_INDEX_MAX_LINES:
+        return True, f"body has {line_count} lines (cap={_GENIUS_INDEX_MAX_LINES})"
+    return False, ""
+
+
 class GeniusClient:
     """Adaptive wrapper around the ``lyricsgenius`` package.
 
@@ -344,14 +522,39 @@ class GeniusClient:
         text = song.lyrics.strip()
         if not text:
             return LyricsFailure("genius", "empty lyrics")
+        # Reject obvious Genius wiki/list pages (``"List of..."`` entries
+        # and similar) -- their ``song.lyrics`` body is an alphabet
+        # navigation header followed by a name-registry dump, not
+        # vocal lyrics.  Without this gate the fetcher would happily
+        # write 2000+ lines of VTuber names into the user's .lrc.  See
+        # :func:`_classify_genius_text` for the heuristic.
+        is_index, why = _classify_genius_text(text)
+        if is_index:
+            return LyricsFailure(
+                "genius", f"page looks like a Genius list/index ({why})",
+            )
+        # Auto-correct guard: even after the index-page filter, Genius
+        # can return a totally different popular song whose title/artist
+        # partially match the query (e.g. user types a typo and gets the
+        # most-streamed result instead).  Token-set Overlap Coefficient
+        # forgives surface variants (``The Beatles`` vs ``Beatles``,
+        # ``feat. X``, ``(Remastered)``) but rejects genuinely different
+        # songs.  See :func:`_is_genius_match` for the heuristic.
         primary = getattr(song, "primary_artist", None)
         album_field = getattr(song, "album", None)
+        r_title = song.title or title
+        r_artist = _extract_name(primary, default=artist)
+        is_match, mismatch_why = _is_genius_match(
+            title, artist, r_title, r_artist,
+        )
+        if not is_match:
+            return LyricsFailure("genius", f"song mismatch: {mismatch_why}")
         if primary is not None and not isinstance(primary, (dict, str)):
             LOG.debug("Genius returned primary_artist of type %s", type(primary).__name__)
         return LyricsResult(
             provider="genius",
-            title=song.title or title,
-            artist=_extract_name(primary, default=artist),
+            title=r_title,
+            artist=r_artist,
             album=_extract_name(album_field, default=""),
             length_seconds=0.0,
             synced_lines=[],
@@ -397,36 +600,13 @@ class LyricsFetcher:
         self.audio_analyzer = audio_analyzer
         self.cancel_event = cancel_event
 
-    @staticmethod
-    def _looks_instrumental(audio: AudioFile) -> bool:
-        """True if ``audio.title`` looks like an instrumental / karaoke version.
-
-        Word-bounded regex (mirrors :meth:`_filename_blocks_audio`) so a
-        title like ``Song (Instrumental)`` or ``Song [Karaoke]`` short-
-        circuits the lyrics chain (correctly) but a title like
-        ``Instrumentalist rock song`` does NOT -- the substring
-        ``"instrumental"`` is followed by ``"i"`` (a letter), so the
-        new boundary check refuses to call it instrumental.  Also
-        picks up Cyrillic titles like ``Песня (Инструментал)``: the old
-        ASCII-only plain-substring check missed those because the
-        vocabulary it tested had no Cyrillic entries at all and the
-        ``"(karaoke)" in t`` substring is also ASCII-only.  The full
-        vocabulary (English + Russian + the belt-and-suspenders
-        CamelCase variants) is shared with the FILENAME check via
-        :data:`_INSTRUMENTAL_FILENAME_PATTERNS` so the two short-
-        circuits agree on what counts as instrumental.
-        """
-        title = audio.title or ""
-        return bool(LyricsFetcher._INSTRUMENTAL_TITLE_RE.search(title))
-
     # Substrings in the *filename* (case-insensitive, punctuation/whitespace
     # normalised) that mark a track as an instrumental / karaoke / backing-
     # track version.  We deliberately only short-circuit the LOCAL audio
     # analysis branch on a match -- LRCLIB + Genius still get a chance to
     # return the original song's lyrics, since ``"Song (Off Vocal).flac"``
     # is often a faithful cover of a real song that LRCLIB knows.
-    # Note this is a filename check, not a title check (the title-based
-    # short-circuit in :meth:`_looks_instrumental` is unrelated and stays).
+    # Filename check only; a title-tag counterpart is not implemented.
     _INSTRUMENTAL_FILENAME_PATTERNS: tuple[str, ...] = (
         # English patterns (existed since v1.1.0).
         "backing track",
@@ -481,28 +661,6 @@ class LyricsFetcher:
         re.IGNORECASE,
     )
 
-    # Compiled word-bounded regex used by :meth:`_looks_instrumental`
-    # to short-circuit the lyrics chain for tracks whose ID3 / Vorbis
-    # title tag indicates an instrumental / karaoke version.  Bound
-    # to :data:`_INSTRUMENTAL_FILENAME_PATTERNS` (same vocabulary as
-    # the filename short-circuit -- including the Cyrillic entries
-    # ``инструментал``, ``караоке``, ``минусовка``, ``без вокала``,
-    # ``акапелла``) so the title and filename heuristics stay in
-    # sync.  The boundary class expands on the FILENAME regex
-    # (``[\s\-_.]``) with title-richer punctuation so bracketed /
-    # parenthesised markers like ``(Instrumental)`` and
-    # ``[Karaoke]``, plus comma / semicolon / colon separators
-    # common in multi-artist titles, still match: titles don't have
-    # the CamelCase concerns that filenames do (ID3 / Vorbis tags
-    # reliably store the spaces directly), so no equivalent of
-    # :meth:`_filename_blocks_audio`'s CamelCase split is needed.
-    _INSTRUMENTAL_TITLE_RE = re.compile(
-        r"(?:^|[\s\-_.,;:()\[\]])("
-        + "|".join(re.escape(p) for p in _INSTRUMENTAL_FILENAME_PATTERNS)
-        + r")(?:$|[\s\-_.,;:()\[\]])",
-        re.IGNORECASE,
-    )
-
     @staticmethod
     def _filename_blocks_audio(audio: AudioFile) -> bool:
         """True if ``audio.path`` looks like an instrumental/karaoke version.
@@ -547,20 +705,9 @@ class LyricsFetcher:
         return bool(LyricsFetcher._INSTRUMENTAL_FILENAME_RE.search(name))
 
     def fetch(self, audio: AudioFile) -> LyricsResult | LyricsFailure:
-        # NOTE: The instrumental title-tag short-circuit lives in
-        # :func:`lyricsfag.process_one` (which uses
-        # :meth:`_looks_instrumental` and returns
-        # :data:`STATUS_SKIPPED_INSTRUMENTAL`), NOT here -- so this
-        # ``fetch`` stays focused on the LRCLIB / Genius / audio
-        # provider chain.  The pre-flight skip writes no LRC at all
-        # (the previous stub ``[Instrumental]`` LyricsResult was
-        # misleading because some audio players render its content as
-        # real lyrics), keeps ``failed`` uncounted, and keeps ``main``'s
-        # exit code at 0 on runs where every track is instrumental.
-        # Direct callers of :meth:`fetch` who want the same semantics
-        # should call :meth:`_looks_instrumental` themselves; this
-        # method is intentionally minimal so it remains a clean
-        # ``LyricsResult | LyricsFailure`` union from the caller's POV.
+        # Instrumental short-circuit (filename only) lives in the ``audio``
+        # branch below.  LRCLIB + Genius are deliberately NOT gated -- a
+        # karaoke file whose original song has real lyrics still gets an LRC.
 
         if self.source == "auto":
             order = ["lrclib", "genius"]

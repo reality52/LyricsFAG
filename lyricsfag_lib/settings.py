@@ -8,8 +8,8 @@ a single MB.
 
 Storage location
 ----------------
-* Windows : ``%APPDATA%\LyricsFAG\settings.json`` (falls back to
-  ``~\\LyricsFAG\settings.json`` when ``%APPDATA%`` is unset).
+* Windows : ``%APPDATA%\\LyricsFAG\\settings.json`` (falls back to
+  ``~\\LyricsFAG\\settings.json`` when ``%APPDATA%`` is unset).
 * macOS   : ``~/Library/Application Support/LyricsFAG/settings.json``.
 * Linux   : ``$XDG_CONFIG_HOME/lyricsfag/settings.json`` (falls back to
   ``~/.config/lyricsfag/settings.json``).
@@ -31,10 +31,12 @@ crash the GUI on startup -- it will silently fall back to the default.
 * ``use_audio_analysis``  ``bool``
 * ``source``              ``str`` in ``{"auto", "lrclib", "genius"}``
 * ``genius_token``        ``str``  (plaintext; see SECURITY note below)
-* ``audio_model``         ``str`` in ``SUPPORTED_MODELS``
+* ``audio_model``         ``str``  in ``SUPPORTED_MODELS``
 * ``audio_model_path``    ``str``  (may be empty)
-* ``device``              ``str`` in ``{"auto", "cuda", "cpu"}``
-* ``demucs``              ``str`` in ``{"on", "off"}``
+* ``device``              ``str``  in ``{"auto", "cuda", "cpu"}``
+
+Note: demucs was mandatory as of v1.1.0, so a stale ``"demucs"`` key
+from a pre-v1.1.0 ``settings.json`` is silently dropped.
 
 Write semantics
 ---------------
@@ -75,7 +77,6 @@ LOG = logging.getLogger(__name__)
 # the validator stay in lockstep without copy-paste drift.
 _VALID_SOURCES: frozenset[str] = frozenset({"auto", "lrclib", "genius"})
 _VALID_DEVICES: frozenset[str] = frozenset({"auto", "cuda", "cpu"})
-_VALID_DEMUCS: frozenset[str] = frozenset({"on", "off"})
 _VALID_AUDIO_MODELS: frozenset[str] = frozenset(SUPPORTED_MODELS)
 
 # Sub-directory under the OS config root.  ``LyricsFAG`` matches the
@@ -151,9 +152,7 @@ def sanitize(raw: dict) -> dict:
     if isinstance(dev, str) and dev in _VALID_DEVICES:
         out["device"] = dev
 
-    demucs = raw.get("demucs")
-    if isinstance(demucs, str) and demucs in _VALID_DEMUCS:
-        out["demucs"] = demucs
+    # ``demucs`` (pre-v1.1.0 on/off toggle) dropped silently -- knob removed.
 
     return out
 

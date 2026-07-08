@@ -635,11 +635,6 @@ class LyricsFAGApp(tk.Tk):
         )
         self.device_combo.grid(row=0, column=3, sticky="w")
 
-        # (demucs_label removed in v1.1.0 -- demucs is now mandatory)
-        # (demucs_label, demucs_var, demucs_combo widgets removed in
-        # v1.1.0 -- demucs is now mandatory with the audio analysis
-        # fallback, so the on/off combobox is gone)
-
         self.audio_model_path_label = ttk.Label(
             audio_row, text="Model path (optional):"
         )
