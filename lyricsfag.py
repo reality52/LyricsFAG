@@ -42,6 +42,7 @@ from lyricsfag_lib.lyrics import (  # noqa: E402
     LyricsResult,
 )
 from lyricsfag_lib.lrc import write_lrc  # noqa: E402
+from lyricsfag_lib import __version__ as _LIBRARY_VERSION  # noqa: E402
 
 LOG = logging.getLogger("lyricsfag")
 
@@ -361,6 +362,30 @@ def process_one(
         doc.album = audio.album
     if not doc.length_seconds:
         doc.length_seconds = audio.duration
+    # v1.2.1 — liner-notes: propagate the audio-file's tag-derived
+    # composer / language / year so the LRC carries richer context
+    # (rendered by ``lrc._serialize`` as ``[au:..]`` / ``[lang:..]``
+    # / ``[year:YYYY]`` between ``[al:..]`` and ``[length:..]``).
+    # Always stamp the ``[tool:]`` credit with the current library
+    # version so every :func:`write_lrc` call past this point is
+    # attributable.  None of these fields override a value the
+    # provider already populated (the ``if not`` guards) -- LRCLIB
+    # may eventually expose composer/year/lang and we want the
+    # richer provider answer to win when both sides have data.
+    if not doc.composer:
+        doc.composer = audio.composer
+    if not doc.language:
+        doc.language = audio.language
+    if not doc.year:
+        doc.year = audio.year
+    # ``doc.tool`` is set UNCONDITIONALLY (no ``if not`` guard).
+    # The CLI is the single source of truth for the
+    # ``[tool:LyricsFAG X.Y.Z]`` credit; any value a test / unit
+    # caller may have pre-populated on ``LRCDocument`` for
+    # round-trip convenience is deliberately overwritten so the
+    # shipped file is always attributable to the current library
+    # version.
+    doc.tool = f"LyricsFAG {_LIBRARY_VERSION}"
 
     target = audio.lrc_path
     if dry_run:

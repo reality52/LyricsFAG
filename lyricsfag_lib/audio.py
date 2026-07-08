@@ -37,7 +37,15 @@ SUPPORTED_EXTENSIONS: tuple[str, ...] = (
 
 @dataclass
 class AudioFile:
-    """A single audio file with its tag metadata (best-effort)."""
+    """A single audio file with its tag metadata (best-effort).
+
+    ``composer``, ``language`` and ``year`` are populated from mutagen
+    tags (TCOM/©wrt/COMPOSER, TLAN/LAN, TDRC/TYER/©day/DATE/YEAR)
+    on best effort and are used to populate the same-name LRC
+    headers in :class:`lyricsfag_lib.lrc.LRCDocument` so dropped
+    files have richer liner-notes.  All three default to empty/zero
+    so callers that don't care about them see no behaviour change.
+    """
 
     path: Path
     title: str = ""
@@ -45,6 +53,9 @@ class AudioFile:
     album: str = ""
     duration: float = 0.0
     source: str = "unknown"  # 'tags', 'filename', 'none'
+    composer: str = ""
+    language: str = ""
+    year: int = 0
 
     @property
     def lrc_path(self) -> Path:
@@ -127,6 +138,14 @@ def parse_audio(path: Path) -> AudioFile:
         title_keys = ("TIT2", "title", "\xa9nam", "TITLE")
         artist_keys = ("TPE1", "artist", "\xa9ART", "ARTIST")
         album_keys = ("TALB", "album", "\xa9alb", "ALBUM")
+        composer_keys = ("TCOM", "composer", "\xa9wrt", "COMPOSER")
+        language_keys = ("TLAN", "language", "LAN")
+        # ``TDRC`` is ID3v2.4 recording time (may be ``"2024-08"``
+        # or full ISO ``"2024-08-01"``); ``TYER`` is ID3v2.3 plain
+        # ``"2024"``.  Vorbis/FLAC use ``DATE`` or ``YEAR``; MP4 uses
+        # ``\xa9day``.  Format-specific keys come first so a tagged
+        # ``DATE: 2024-09`` doesn't lose to a stray fallback later.
+        year_keys = ("TDRC", "TYER", "\xa9day", "DATE", "YEAR")
         for k in title_keys:
             v = _first_tag(tags, k)
             if v:
@@ -142,6 +161,46 @@ def parse_audio(path: Path) -> AudioFile:
             if v:
                 af.album = v
                 break
+        for k in composer_keys:
+            v = _first_tag(tags, k)
+            if v:
+                af.composer = v
+                break
+        for k in language_keys:
+            v = _first_tag(tags, k)
+            if v:
+                af.language = v
+                break
+        for k in year_keys:
+            v = _first_tag(tags, k)
+            if v:
+                # ``TDRC`` may be ``"2024-08-01"`` -- we only want
+                # the year for ``[year:YYYY]``.  First 4-digit run,
+                # falling back to full int() on the slim chance the
+                # tag already holds a plain 4-digit string.  Both
+                # paths raise-guard so a malformed tag (``"N/A"``,
+                # ``"unknown"``) lands on ``year == 0`` and the LRC
+                # writer simply skips the ``[year:]`` header.
+                stripped = v.strip()
+                head = stripped[:4]
+                if head.isdigit():
+                    # ``head.isdigit()`` guarantees ``int(head)``
+                    # is safe (Python's ``str.isdigit`` rejects any
+                    # non-digit ASCII / Unicode char so a
+                    # ``ValueError`` from the parse is unreachable
+                    # here).  Falling through rather than raising
+                    # for ``"0000"``-style sentinels keeps the rest
+                    # of the list alive; the outer ``try / except
+                    # ValueError`` below is what catches malformed
+                    # tags like ``"N/A"``.
+                    af.year = int(head)
+                    if af.year:
+                        break
+                try:
+                    af.year = int(stripped)
+                    break
+                except ValueError:
+                    continue
 
         if af.title or af.artist:
             af.source = "tags"
@@ -159,6 +218,8 @@ def parse_audio(path: Path) -> AudioFile:
     af.artist = af.artist.strip()
     af.title = af.title.strip()
     af.album = af.album.strip()
+    af.composer = af.composer.strip()
+    af.language = af.language.strip()
     return af
 
 

@@ -31,6 +31,13 @@ class LRCDocument:
 
     ``lines`` is a list of (timestamp_str, text) pairs.  An empty timestamp
     string ("") marks an unsynced line at the top of the body.
+
+    ``composer``, ``language``, ``year`` and ``tool`` are optional
+    "liner-notes" template tags.  ``tool`` is rendered as
+    ``[tool:LyricsFAG X.Y.Z]`` when set; the other three are rendered
+    conditionally only when the corresponding field is populated.
+    Empty values are intentionally the default so legacy LRCDocument
+    callers continue to emit exactly the pre-v1.2.1 header set.
     """
 
     title: str = ""
@@ -39,6 +46,10 @@ class LRCDocument:
     length_seconds: float = 0.0
     lines: list[tuple[str, str]] = field(default_factory=list)
     diagnostic_lines: list[str] = field(default_factory=list)
+    composer: str = ""
+    language: str = ""
+    year: int = 0
+    tool: str = ""
 
     def add(self, timestamp: str, text: str) -> None:
         self.lines.append((timestamp.strip(), text.strip()))
@@ -97,6 +108,23 @@ def _serialize(doc: LRCDocument) -> str:
         parts.append(f"[ar:{doc.artist}]")
     if doc.album:
         parts.append(f"[al:{doc.album}]")
+    # Liner-notes template fields.  Rendered in a stable order between
+    # [al:] and [length:] so the file still looks like a stock LRC
+    # to the parser in :func:`header_lines`, and so a downstream
+    # tool / player that walks the headers in order sees the same
+    # sequence every time.  Each header is conditional so an
+    # under-tagged audio file only emits the fields it actually has
+    # populated; ``tool`` is unconditional within ``if doc.tool``
+    # so the producer credit vanishes if a caller explicitly opts
+    # out by clearing ``tool``.
+    if doc.composer:
+        parts.append(f"[au:{doc.composer}]")
+    if doc.language:
+        parts.append(f"[lang:{doc.language}]")
+    if doc.year > 0:
+        parts.append(f"[year:{doc.year}]")
+    if doc.tool:
+        parts.append(f"[tool:{doc.tool}]")
     if doc.length_seconds > 0:
         parts.append(f"[length:{format_duration(doc.length_seconds)}]")
 
