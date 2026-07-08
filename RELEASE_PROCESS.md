@@ -33,13 +33,19 @@ bump. This is a known quirk of v1.1.4.
 For each release vX.Y.Z, **one commit** is the "release commit":
 
 1. **Make code changes.** Stage them as usual.
-2. **In the same working tree, write `RELEASE_NOTES_X.Y.Z.md`**
-   (bilingual EN+RU per the existing convention used by v1.1.1 /
-   v1.1.2 / v1.1.3 / v1.1.4) and bump `__version__` in
+2. **In the same working tree, prepend a new `## vX.Y.Z (date)` section
+   to [`RELEASE_NOTES.md`](RELEASE_NOTES.md)** (bilingual EN+RU; the
+   consolidated changelog holds every shipped version with the
+   newest at the top — replaces the per-release-file pattern that
+   v1.1.x used) and bump `__version__` in
    `lyricsfag_lib/__init__.py` to `"X.Y.Z"`.
-3. `git add` **everything together** -- the code changes, the release
-   notes, and the version bump. **No separate "docs:" or "chore:"
-   commit for the release notes.**
+3. `git add` **everything together** -- the code changes, the consolidated
+   changelog edit, and the version bump. **No separate "docs:" or "chore:"
+   commit for the release notes** -- the consolidated file already carries
+   the full history. (Pre-v1.2.1 commits used per-release files; the v1.2.1
+   refactor introduced the consolidated format. Old `RELEASE_NOTES_*.md`
+   files are still in git history under their tagged commits for any
+   tooling that checks out an older tag.)
 4. `git commit` with a message like:
    ```
    release: vX.Y.Z
@@ -56,7 +62,9 @@ release notes, and `__version__` bump all in the tagged commit.
 ## What goes in the release commit
 
 * Every code change shipped in this version.
-* `RELEASE_NOTES_X.Y.Z.md` (bilingual EN+RU).
+* A new `## vX.Y.Z (date)` section prepended to
+  [`RELEASE_NOTES.md`](RELEASE_NOTES.md) (bilingual EN+RU; the
+  consolidated changelog).
 * The `__version__` bump in `lyricsfag_lib/__init__.py`.
 
 It should **not** include:
@@ -96,11 +104,11 @@ git checkout -b fix/whatever main
 git add -p
 
 # 2. Release notes + version bump (same working tree)
-$EDITOR RELEASE_NOTES_1.1.5.md         # bilingual EN+RU
+$EDITOR RELEASE_NOTES.md               # bilingual EN+RU; prepend a "## vX.Y.Z (date)" section at the top
 # ... edit __version__ in lyricsfag_lib/__init__.py ...
 
 # 3. Stage everything together
-git add RELEASE_NOTES_1.1.5.md lyricsfag_lib/__init__.py <code files>
+git add RELEASE_NOTES.md lyricsfag_lib/__init__.py <code files>
 
 # 4. One release commit
 git commit -F - <<'MSG'
@@ -136,7 +144,11 @@ operation; only do it if nothing external references the current
 
 ## See also
 
-* `RELEASE_NOTES_*.md` for what shipped in each version.
+* [`RELEASE_NOTES.md`](RELEASE_NOTES.md) - the consolidated changelog
+  (every shipped version in one file, newest-first).
+* Old `RELEASE_NOTES_*.md` per-release files (used through v1.1.4) are
+  still in git history under their tagged commits; this refactor (v1.2.1)
+  consolidated them into the single `RELEASE_NOTES.md`.
 * `README.md` / `README.ru.md` for user-facing docs.
 
 
@@ -177,13 +189,19 @@ v1.1.4 использовал двух-коммитный release-flow:
 Для каждого релиза vX.Y.Z **один коммит** -- это "release-коммит":
 
 1. **Сделайте изменения в коде.** Застейджьте их как обычно.
-2. **В том же рабочем дереве напишите `RELEASE_NOTES_X.Y.Z.md`**
-   (билингва EN+RU по существующей конвенции, используемой в v1.1.1
-   / v1.1.2 / v1.1.3 / v1.1.4) и бампните `__version__` в
-   `lyricsfag_lib/__init__.py` до `"X.Y.Z"`.
-3. `git add` **всё вместе** -- изменения в коде, release notes и
-   бамп версии. **Никакого отдельного "docs:" или "chore:" коммита
-   для release notes.**
+2. **В том же рабочем дереве добавьте новую `## vX.Y.Z (date)` секцию
+   в начало [`RELEASE_NOTES.md`](RELEASE_NOTES.md)** (билингва EN+RU;
+   консолидированный changelog хранит все поставленные версии, новейшая
+   сверху — заменяет per-release-file паттерн, использовавшийся в
+   v1.1.x) и бампните `__version__` в `lyricsfag_lib/__init__.py`
+   до `"X.Y.Z"`.
+3. `git add` **всё вместе** -- изменения в коде, правка консолидированного
+   changelog'а и бамп версии. **Никакого отдельного "docs:" или "chore:"
+   коммита для release notes** -- консолидированный файл уже несёт полную
+   историю. (До v1.2.1 коммиты использовали per-release файлы; рефактор
+   v1.2.1 ввёл консолидированный формат. Старые `RELEASE_NOTES_*.md`
+   файлы остались в git-истории под своими тегированными коммитами для
+   любого тулинга, который чекаутит старый тег.)
 4. `git commit` с сообщением вида:
    ```
    release: vX.Y.Z
@@ -201,7 +219,9 @@ v1.1.4 использовал двух-коммитный release-flow:
 ## Что идёт в release-коммит
 
 * Каждое изменение в коде, поставляемое в этой версии.
-* `RELEASE_NOTES_X.Y.Z.md` (билингва EN+RU).
+* Новая `## vX.Y.Z (date)` секция, добавленная в начало
+  [`RELEASE_NOTES.md`](RELEASE_NOTES.md) (билингва EN+RU;
+  консолидированный changelog).
 * Бамп `__version__` в `lyricsfag_lib/__init__.py`.
 
 Не должно идти в release-коммит:
@@ -241,11 +261,11 @@ git checkout -b fix/whatever main
 git add -p
 
 # 2. Release notes + бамп версии (то же рабочее дерево)
-$EDITOR RELEASE_NOTES_1.1.5.md         # билингва EN+RU
+$EDITOR RELEASE_NOTES.md               # билингва EN+RU; добавьте "## vX.Y.Z (date)" секцию в начало
 # ... edit __version__ in lyricsfag_lib/__init__.py ...
 
 # 3. Застейджьте всё вместе
-git add RELEASE_NOTES_1.1.5.md lyricsfag_lib/__init__.py <code files>
+git add RELEASE_NOTES.md lyricsfag_lib/__init__.py <code files>
 
 # 4. Один release-коммит
 git commit -F - <<'MSG'
@@ -281,5 +301,9 @@ v1.1.4 был срезан со старым двух-коммитным flow (r
 
 ## См. также
 
-* `RELEASE_NOTES_*.md` -- что поставлялось в каждой версии.
+* [`RELEASE_NOTES.md`](RELEASE_NOTES.md) -- консолидированный changelog
+  (все поставленные версии в одном файле, newest-first).
+* Старые `RELEASE_NOTES_*.md` per-release файлы (использовались до
+  v1.1.4) остались в git-истории под своими тегированными коммитами;
+  этот рефактор (v1.2.1) консолидировал их в единый `RELEASE_NOTES.md`.
 * `README.md` / `README.ru.md` -- пользовательская документация.

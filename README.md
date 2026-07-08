@@ -435,7 +435,7 @@ for the initial release).
 
 ## Release history
 
-Detailed per-release notes live as `RELEASE_NOTES_X.Y.Z.md` at the repo root.
+Detailed release notes live in [`RELEASE_NOTES.md`](RELEASE_NOTES.md) — one consolidated changelog, newest first.
 
 ### v1.1.0
 
@@ -469,7 +469,7 @@ Audio-analysis contract change + new local-only `audio` source.
   that no longer exists).
 - `lyricsfag_lib.__version__` is now `1.1.0`.
 
-See [`RELEASE_NOTES_1.1.0.md`](RELEASE_NOTES_1.1.0.md) for the full
+See the [consolidated `RELEASE_NOTES.md`](RELEASE_NOTES.md) (scroll to the v1.1.0 entry) for the full
 per-commit breakdown.
 
 ### v1.0.2
@@ -497,7 +497,7 @@ Pre-release polish. No API changes.
   label to stop shadowing the status-row badge. `lyricsfag_lib.__version__`
   is now `1.0.2` (had been stuck at `0.1.0` since the initial scaffolding).
 
-See [`RELEASE_NOTES_1.0.2.md`](RELEASE_NOTES_1.0.2.md) for the full
+See the [consolidated `RELEASE_NOTES.md`](RELEASE_NOTES.md) (scroll to the v1.0.2 entry) for the full
 per-commit breakdown.
 
 ### v1.0.1
@@ -505,8 +505,8 @@ per-commit breakdown.
 First tagged release — README polish, Russian translation (`README.ru.md`),
 AI-assistance disclaimer, simpler Whisper diagnostic in `.lrc`.
 
-See [`RELEASE_NOTES_1.0.1.md`](RELEASE_NOTES_1.0.1.md) (the file was added
-on `main` in v1.0.2 as a retroactive backfill; the `1.0.1` git tag's tree
+See the [consolidated `RELEASE_NOTES.md`](RELEASE_NOTES.md) (scroll to the v1.0.1 entry; the file was added
+on `main` in v1.0.2 as a retroactive backfill — the `1.0.1` git tag's tree
 doesn't contain it).
 
 ## License & credits

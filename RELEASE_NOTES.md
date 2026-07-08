@@ -1,0 +1,1940 @@
+# LyricsFAG — release notes
+
+*Consolidated reverse-chronological changelog covering every shipped
+version. New releases prepend their note to the top of this file;
+see [`RELEASE_PROCESS.md`](RELEASE_PROCESS.md) for the ship-it
+process.*
+
+# LyricsFAG v1.2.0 — release notes
+
+*Shipped 2026-07-08. Minor release (v1.1.4 → v1.2.0).*
+
+## TL;DR
+
+Genius is now reliably sane: wiki/list pages such as `List of Virtual
+YouTubers (VTubers)` — which used to dump 2000+ lines of name-registry
+gibberish into the user's `.lrc` — are now rejected before the lyrics
+chain falls through to the next provider. Wrong-song auto-corrects
+(`"Yesterday"` by the Beatles matched to `"Imagine"` by John Lennon
+because of a Genius typo-tolerant search) are also rejected with a
+diagnostic that names the query and the response so the user can fix
+their tags at a glance. As a bonus, the long-broken / dead-coded
+title-tag instrumental heuristic, the ASCII backslash path docs in
+`settings.py`, the `_VALID_DEMUCS` frozenset left over from v1.1.0's
+demucs-toggle removal, and the paranoid `getattr(args, …)` defaults
+on existing argparse arguments are all pruned so the codebase reads
+cleanly ahead of the next minor cycle. No settings.json migration;
+no CLI or GUI surface change.
+
+## What's new
+
+### Lyrics: Genius index-page filter — `LyricsFailure` on wiki/list bodies
+
+Some Genius pages are wiki articles rather than songs — most
+prominently `List of *` entries whose "lyrics" body is an
+alphabet-navigation header (`A | B | C | … | Z`) followed by a
+name-registry dump (`Kageyama Shien / 影山シエン (HOLOSTARS)`, …)
+totalling thousands of lines. `lyricsgenius.search_song` happily
+returns such a page when the user's audio tags happen to
+partial-match the title; before v1.2.0 the lyrics chain then wrote
+the entire registry into the user's `.lrc`. v1.2.0 inserts a
+module-level `_classify_genius_text(text)` filter inside
+`GeniusClient.get()` that rejects the body when **either** of two
+*binary* signals fires:
+
+* **Alphabet-navigation header.** The first 30 non-blank lines of
+  the body contain ≥ 8 single-character ASCII alpha lines
+  (`A`, `B`, `C`, …) — the form a Genius table-of-contents renders
+  with each letter on its own cell. The predicate is
+  `len(l) == 1 and l.isascii() and l.isalpha()` — strictly ASCII
+  alpha — so a poetic song that legitimately opens with one CJK
+  ideograph per line (think: a Japanese verse ending each line
+  with a single kanji) cannot false-positive.
+* **Long-body cap.** `text.count("\n")` exceeds 1000. Wiki articles,
+  transcripts, and book chapters routinely run that long; even the
+  longest reasonable song (Rap-God-class with explicit `[Verse]` /
+  `[Chorus]` markers) renders to well under 300 lines in
+  `lyricsgenius`' output, leaving ~3× safety margin.
+
+The filter returns `(matched, why)` so `LyricsFailure.reason`
+includes the diagnostic — e.g.
+
+```
+genius: page looks like a Genius list/index (alphabet-navigation header detected)
+genius: page looks like a Genius list/index (body has 1107 lines (cap=1000))
+```
+
+The fetcher falls through to the next provider (LRCLIB, then
+audio) instead of writing the wiki page into the `.lrc`.
+
+### Lyrics: Genius song-mismatch auto-correct guard — token-set Overlap Coefficient
+
+Even after the index-page filter, Genius can return a *real* song
+whose title/artist partial-match the query when the user actually
+wanted a different (less popular) one. A typo-tolerant search for
+`"Yesterday" by "Beatles"` can match `"Imagine" by "John Lennon"`
+on partial keyword overlap; v1.2.0 catches this with a
+module-level `_is_genius_match(query_title, query_artist,
+response_title, response_artist)` helper that requires
+**token-set Overlap Coefficient** `|A ∩ B| / min(|A|, |B|)` ≥ 0.5
+on BOTH title and artist independently. The metric is forgiving
+for surface variants that don't change song identity:
+
+* Leading `The` in artist names — `Beatles` query vs `The Beatles`
+  response → score 1.0 after `the` is dropped at tokenisation.
+* Featured artists — `Lose Yourself` by `Eminem` query vs
+  `Lose Yourself feat. Rihanna` by `Eminem` response → score 1.0
+  after `feat` is dropped.
+* Release-variant suffixes — `Yesterday` query vs
+  `Yesterday - Remastered 2009` response → score 1.0 after
+  `remastered` is dropped.
+* Common prepositions / articles in album/venue suffixes —
+  `from`, `in`, `of`, `on`, `at`, `the`, `a`, `an` are dropped
+  so a query of `Sounds` does not spuriously match
+  `Sounds of Silence` only by article overlap.
+
+…while still rejecting a wholly different song that shares one
+common word with the query. The `LyricsFailure.reason` includes
+both query and response strings plus the raw overlap scores so
+the user can fix their tags without re-running:
+
+```
+genius: song mismatch: query 'Yesterday' by 'Beatles' != response 'Imagine' by 'John Lennon' (title=0.00, artist=1.00)
+```
+
+The same logic forgives abbreviated artist names (`M. Jackson`
+vs `Michael Jackson` → 0.50 after tokenisation, exactly at
+threshold) and partial artist last names (`Lennon` vs `John
+Lennon` → 0.50).
+
+### Cleanup: dead code + redundant paranoia
+
+* `lyricsfag_lib/lyrics.py`: removed the `@staticmethod
+  _looks_instrumental` and the compiled `_INSTRUMENTAL_TITLE_RE`
+  regex (and their explanatory docstrings) — neither was called
+  from the GUI/CLI; only the filename-based
+  `_filename_blocks_audio` short-circuit on the audio branch is
+  in use since v1.1.0. Updated `LyricsFetcher.fetch()`'s leading
+  comment to reflect the actual current state.
+* `lyricsfag_lib/settings.py`: removed `_VALID_DEMUCS` frozenset
+  and the `demucs` key sanitization branch — the GUI's
+  `_save_settings_snapshot` / `_apply_persisted_settings` never
+  persisted that key post-v1.1.0 (when the on/off demucs
+  combobox was removed in lockstep with the `--no-demucs` CLI
+  flag), so the validator was reading dead data. Schema
+  docstring updated to note that a pre-v1.1.0 `demucs` key in an
+  old `settings.json` file is silently dropped.
+* `lyricsfag.py` `_build_audio_analyzer`: replaced
+  `getattr(args, "enable_demucs", True)` with a literal `True`
+  plus a comment explaining the demucs-mandatory invariant
+  (the `--enable-demucs` CLI flag was never added; the getattr
+  was a no-op defaulting to True). Same simplification for
+  `args.audio_model`, `args.audio_model_path`, `args.device`,
+  which ARE registered on the parser and so didn't need
+  getattr paranoia; the cleanup tightens the call sites to
+  direct attribute access.
+* Module-level `SyntaxWarning` fix: the `settings.py` module
+  docstring had `\` immediately followed by non-escape
+  characters in three Windows path examples
+  (`%APPDATA%\LyricsFAG\…`) which triggered
+  `SyntaxWarning: invalid escape sequence` under
+  `python -W error::SyntaxWarning`. These are now `\\` so the
+  docstring renders genuine backslashes and the warning is
+  silenced.
+
+## Upgrade notes
+
+* **No code-level migration is required.** Drop-in upgrade from
+  v1.1.4 — `settings.json` still loads cleanly, CLI flags / GUI
+  widgets are unchanged, the lyrics chain's provider order is
+  unchanged.
+* Genius now rejects *bad* results more aggressively. Users with
+  legitimately misspelled tags in their audio files will see
+  `genius: no match` / `genius: song mismatch: …` / `genius:
+  page looks like a Genius list/index (…)` log entries instead
+  of silently bad `.lrc` files. The user-facing chain falls
+  through to LRCLIB and then the local audio fallback so the
+  overall hit-rate is unchanged for correctly-tagged files; the
+  difference is that misclassified Genius hits now produce
+  actionable diagnostics instead of garbage `.lrc` content.
+* Python 3.x is unchanged. PyInstaller users rebuilding the
+  `.exe` get the same sizes as v1.1.4 (~50 MB lite / ~3.5 GB
+  portable); no new deps, no removed deps. `requirements.txt`
+  / `requirements-audio.txt` are unchanged.
+
+## Files changed
+
+* `lyricsfag_lib/lyrics.py`:
+  * **New module-level helpers** (above `class GeniusClient:`):
+    `_classify_genius_text(text)` (alphabet-navigation header
+    OR >1000-line cap, returns `(matched, why)`); the
+    `_GENIUS_INDEX_HEAD_LEN`,
+    `_GENIUS_INDEX_HEAD_MIN_SINGLE_CHARS`,
+    `_GENIUS_INDEX_MAX_LINES` constants. `_is_genius_match(...)`
+    (token-set Overlap Coefficient on title AND artist, both
+    ≥ 0.5); `_genius_match_tokens(text)` / `_overlap_coef(a, b)`
+    internals; the `_GENIUS_MATCH_THRESHOLD` and
+    `_GENIUS_MATCH_STOPWORDS` constants (covers
+    `the/a/an/in/of/on/at/from`, `feat/ft/featuring/with`,
+    release variants `remastered/live/acoustic/radio/
+    edit/edition/version/remix/mix/demo/take`, and a few
+    Genius-noise tokens like `original/single/album/ost`).
+  * `from itertools import islice` added to the stdlib imports
+    (used in `_classify_genius_text` for early-exit on the
+    head-sample).
+  * `GeniusClient.get()`: after the empty-text check, calls
+    `_classify_genius_text(text)`. On `(True, why)`, returns
+    `LyricsFailure("genius", "page looks like a Genius
+    list/index (<why>)")`. After the body filter, extracts
+    `r_title = song.title or title` and `r_artist =
+    _extract_name(primary, default=artist)`, calls
+    `_is_genius_match(title, artist, r_title, r_artist)`, and on
+    `(False, mismatch_why)` returns `LyricsFailure("genius", f"song mismatch: {mismatch_why}")`.
+  * **Removed:** `LyricsFetcher._looks_instrumental` static
+    method and the `_INSTRUMENTAL_TITLE_RE` compiled regex
+    (no external callers — the title-tag short-circuit was
+    *intended* but never wired into `process_one`; the regex
+    was orphaned since v1.1.0's filename-only short-circuit).
+    The `_INSTRUMENTAL_FILENAME_PATTERNS` /
+    `_INSTRUMENTAL_FILENAME_RE` / `_filename_blocks_audio`
+    triple (active on the audio branch since v1.1.0) is
+    unchanged.
+  * `LyricsFetcher.fetch()` leading comment: replaced the
+    obsolete "instrumental title-tag short-circuit lives here"
+    rationale with the actual current state (filename-based,
+    gated to the `audio` branch via `_filename_blocks_audio`).
+* `lyricsfag_lib/settings.py`:
+  * Removed `_VALID_DEMUCS` frozenset and the `demucs` key
+    sanitization branch in `sanitize()`. The Schema docstring
+    entry is replaced with a one-line note that pre-v1.1.0
+    `settings.json` files with a `demucs` key are silently
+    dropped.
+  * Module docstring: fixed `SyntaxWarning: invalid escape
+    sequence` by changing three Windows path examples from
+    `%APPDATA%\LyricsFAG\…` to
+    `%APPDATA%\\LyricsFAG\\…` (so the docstring renders real
+    backslashes and the file passes
+    `-W error::SyntaxWarning`).
+* `lyricsfag.py`:
+  * `_build_audio_analyzer` simplified to direct
+    `args.audio_model` / `args.audio_model_path or None` /
+    `args.device` access (the getter-with-default idiom was
+    redundant given these three are all registered on
+    `build_parser`). The literal `enable_demucs=True` is
+    hardcoded with an inline comment explaining the
+    demucs-mandatory invariant.
+  * The "Demucs on CPU is slow" warning no longer gates on
+    `getattr(args, "enable_demucs", True)` — the same
+    demucs-mandatory assumption.
+* `lyricsfag_gui.py`:
+  * Removed two stale `(demucs_label removed in v1.1.0 --
+    demucs is now mandatory)` comments that referenced widgets
+    deleted in v1.1.0. They're not needed; the code below
+    them (audio_model_path_label, etc.) is the only audio row.
+* `lyricsfag_lib/__init__.py`:
+  * `__version__` bumped `1.1.4 → 1.2.0`.
+
+## Backward compatibility
+
+* **Non-breaking.** No API or config-file schema change. CLI
+  flags / GUI widgets / `settings.json` keys are unchanged.
+  Audio and lyrics chain provider order is unchanged.
+* Genius misclassification rejection (`LyricsFailure` instead
+  of silent bad `.lrc`) is the only user-visible behavioural
+  change; it improves correctness without affecting the hit-rate
+  on correctly-tagged audio files.
+* The cleanup pass removes no functionality and no public
+  surface — `_looks_instrumental` and `_INSTRUMENTAL_TITLE_RE`
+  were private (`_`-prefixed) helpers with no callers anywhere
+  in the codebase, and the `_VALID_DEMUCS` / `demucs`-key
+  sanitization was reading dead data because the GUI's
+  `_save_settings_snapshot` / `_apply_persisted_settings`
+  never persisted that key post-v1.1.0.
+
+
+---
+
+# LyricsFAG v1.2.0 — заметки о релизе
+
+*Выпущено 2026-07-08. Минорный релиз (v1.1.4 → v1.2.0).*
+
+## TL;DR
+
+Genius теперь надёжно разумен: wiki/list-страницы вроде
+`List of Virtual YouTubers (VTubers)` — которые раньше высыпали
+в пользовательский .lrc по 2000+ строк мусорного name-registry
+— теперь отбраковываются до того, как lyrics-цепочка
+передаёт управление следующему провайдеру. Wrong-song
+auto-corrects (`"Yesterday"` by the Beatles ошибочно
+резолвится в `"Imagine"` by John Lennon благодаря typo-tolerant
+поиску Genius) тоже отбраковываются с диагностикой, которая
+называет query и response, чтобы пользователь мог
+мгновенно поправить свои теги. Бонусом: давно сломанный /
+мёртвый title-tag инструментальный heuristic, ASCII backslash-
+пути в доках settings, оставшийся от v1.1.0 `_VALID_DEMUCS`
+frozenset и параноидальные `getattr(args, …)` дефолты на
+реальных argparse-аргументах — всё прибрано, чтобы кодовая
+база читалась чисто перед следующим минорным циклом. Без
+миграции settings.json; без изменений CLI или GUI-поверхности.
+
+## Что нового
+
+### Lyrics: Genius index-page filter — `LyricsFailure` на wiki/list-телах
+
+Некоторые страницы Genius — это wiki-статьи, а не песни —
+особенно `List of *`-страницы, чьё "lyrics" тело — это
+alphabet-navigation header (`A | B | C | … | Z`), за которым
+следует name-registry дамп (`Kageyama Shien / 影山シエン
+(HOLOSTARS)`, …) на тысячи строк. `lyricsgenius.search_song`
+с удовольствием возвращает такую страницу, когда аудио-теги
+пользователя случайно частично матчат заголовок; до v1.2.0
+lyrics-цепочка затем писала весь реестр в пользовательский
+`.lrc`. v1.2.0 вставляет модульный `_classify_genius_text(text)`
+фильтр внутрь `GeniusClient.get()`, который отбраковывает
+тело, когда срабатывает **любой** из двух *бинарных* сигналов:
+
+* **Alphabet-navigation header.** Первые 30 непустых строк
+  тела содержат ≥ 8 одиночных ASCII alpha символов (`A`, `B`,
+  `C`, …) — форму, в которую Genius переводит содержимое
+  своего table-of-contents, по одной букве на ячейку.
+  Предикат — `len(l) == 1 and l.isascii() and l.isalpha()` —
+  строго ASCII alpha, чтобы поэтическая песня, легитимно
+  открывающаяся одним CJK иероглифом на строке (представьте
+  японский куплет, где каждая строка заканчивается одним
+  кандзи), не срабатывала false-positive.
+* **Long-body cap.** `text.count("\n")` превышает 1000. Wiki-
+  статьи, транскрипты и главы книг обычно такой длины; даже
+  самая длинная разумная песня (уровня Rap God с явными
+  `[Verse]` / `[Chorus]` маркерами) рендерится в well under
+  300 строк в выходе `lyricsgenius`, оставляя ~3× запаса.
+
+Фильтр возвращает `(matched, why)` так что
+`LyricsFailure.reason` включает диагностику — например:
+
+```
+genius: page looks like a Genius list/index (alphabet-navigation header detected)
+genius: page looks like a Genius list/index (body has 1107 lines (cap=1000))
+```
+
+Fetcher передаёт управление следующему провайдеру (LRCLIB,
+потом audio) вместо записи wiki-страницы в `.lrc`.
+
+### Lyrics: Genius song-mismatch auto-correct guard — token-set Overlap Coefficient
+
+Даже после index-page фильтра Genius может вернуть *реальную*
+песню, чей title/artist частично матчат query, когда
+пользователь на самом деле хотел другую (менее популярную).
+Typo-tolerant поиск по `"Yesterday" by "Beatles"` может
+заматчить `"Imagine" by "John Lennon"` на частичном keyword-
+overlap; v1.2.0 ловит это модульным
+`_is_genius_match(query_title, query_artist, response_title,
+response_artist)` хелпером, который требует **token-set Overlap
+Coefficient** `|A ∩ B| / min(|A|, |B|)` ≥ 0.5 на ОБА title и
+artist независимо. Метрика прощает поверхностные варианты,
+не меняющие song-identity:
+
+* Ведущий `The` в именах артистов — `Beatles` query против
+  `The Beatles` response → score 1.0 после того, как `the`
+  отбрасывается при токенизации.
+* Featured-артисты — `Lose Yourself` by `Eminem` query
+  против `Lose Yourself feat. Rihanna` by `Eminem` response
+  → score 1.0 после того, как `feat` отбрасывается.
+* Release-variant суффиксы — `Yesterday` query против
+  `Yesterday - Remastered 2009` response → score 1.0 после
+  отбрасывания `remastered`.
+* Распространённые предлоги/артикли в album/venue
+  суффиксах — `from`, `in`, `of`, `on`, `at`, `the`, `a`,
+  `an` отбрасываются, так что query `Sounds` не матчит
+  false-positive `Sounds of Silence` только за счёт article
+  overlap.
+
+…при этом всё ещё отбраковывает совсем другую песню,
+которая шарит одно общее слово с query. `LyricsFailure.reason`
+включает строки query и response, плюс сырые overlap-скоры,
+чтобы пользователь мог поправить теги без re-run:
+
+```
+genius: song mismatch: query 'Yesterday' by 'Beatles' != response 'Imagine' by 'John Lennon' (title=0.00, artist=1.00)
+```
+
+Та же логика прощает сокращённые имена артистов (`M. Jackson`
+vs `Michael Jackson` → 0.50 после токенизации, ровно на
+грани) и частичные фамилии (`Lennon` vs `John Lennon` →
+0.50).
+
+### Cleanup: мёртвый код + избыточная паранойя
+
+* `lyricsfag_lib/lyrics.py`: удалены `@staticmethod
+  _looks_instrumental` и скомпилированный `_INSTRUMENTAL_TITLE_RE`
+  regex (и их пояснительные docstring) — ни один не
+  вызывался из GUI/CLI; только filename-based
+  `_filename_blocks_audio` шорткат на audio-ветке в
+  активном использовании с v1.1.0. Лидирующий комментарий
+  `LyricsFetcher.fetch()` обновлён под актуальное состояние.
+* `lyricsfag_lib/settings.py`: удалены `_VALID_DEMUCS`
+  frozenset и ветка санитизации ключа `demucs` — GUI'шные
+  `_save_settings_snapshot` / `_apply_persisted_settings`
+  никогда не персистили этот ключ после v1.1.0 (когда
+  demucs on/off combobox был удалён в lockstep с CLI-флагом
+  `--no-demucs`), так что валидатор читал мёртвые данные.
+  Schema-docstring обновлён короткой заметкой, что
+  pre-v1.1.0 `settings.json`-файлы с ключом `demucs` молча
+  отбрасываются.
+* `lyricsfag.py` `_build_audio_analyzer`: `getattr(args,
+  "enable_demucs", True)` заменён на литеральный `True` плюс
+  комментарий, поясняющий инвариант обязательности demucs
+  (CLI-флаг `--enable-demucs` никогда не добавлялся, так что
+  getattr был no-op, дефолтящим в True). То же упрощение
+  для `args.audio_model`, `args.audio_model_path`,
+  `args.device`, которые РЕГИСТРИРУЮТСЯ в парсере и так не
+  нуждались в getattr-паранойе; cleanup затягивает call-
+  сайты на прямой attribute-access.
+* Module-level `SyntaxWarning`-фикс: в docstring модуля
+  `settings.py` стоял `\` сразу перед не-escape символами в
+  трёх Windows-path примерах
+  (`%APPDATA%\LyricsFAG\…`), что триггерило
+  `SyntaxWarning: invalid escape sequence` под
+  `python -W error::SyntaxWarning`. Теперь это `\\`,
+  docstring рендерит реальные backslash'и, варнинг замолкает.
+
+## Заметки по обновлению
+
+* **Кодовой миграции не требуется.** Drop-in апгрейд с
+  v1.1.4 — `settings.json` по-прежнему загружается чисто,
+  CLI-флаги / виджеты GUI не изменились, порядок
+  провайдеров в lyrics-цепочке не изменился.
+* Genius теперь отбраковывает *плохие* результаты более
+  агрессивно. Пользователи с легитимно опечатанными тегами
+  в аудио-файлах увидят `genius: no match` / `genius: song
+  mismatch: …` / `genius: page looks like a Genius
+  list/index (…)` записи в логе вместо молча плохих
+  `.lrc`-файлов. User-facing цепочка передаёт управление на
+  LRCLIB, потом локальный audio-fallback, так что общий
+  hit-rate не меняется для корректно-тегированных файлов;
+  разница в том, что неправильно классифицированные
+  Genius-хиты теперь дают actionable-диагностику вместо
+  мусорного `.lrc`-контента.
+* Python 3.x не изменился. Пользователи PyInstaller,
+  пересобирающие `.exe`, получат те же размеры, что и в
+  v1.1.4 (~50 МБ lite / ~3.5 ГБ portable); ни новых
+  зависимостей, ни удалённых. `requirements.txt` /
+  `requirements-audio.txt` неизменны.
+
+## Изменённые файлы
+
+* `lyricsfag_lib/lyrics.py`:
+  * **Новые модульные хелперы** (над
+    `class GeniusClient:`): `_classify_genius_text(text)`
+    (alphabet-navigation header ИЛИ >1000-line cap,
+    возвращает `(matched, why)`), и константы
+    `_GENIUS_INDEX_HEAD_LEN`,
+    `_GENIUS_INDEX_HEAD_MIN_SINGLE_CHARS`,
+    `_GENIUS_INDEX_MAX_LINES`. `_is_genius_match(...)`
+    (token-set Overlap Coefficient на title И artist,
+    оба ≥ 0.5); внутренности `_genius_match_tokens(text)` /
+    `_overlap_coef(a, b)`; константы
+    `_GENIUS_MATCH_THRESHOLD` и `_GENIUS_MATCH_STOPWORDS`
+    (покрывают
+    `the/a/an/in/of/on/at/from`,
+    `feat/ft/featuring/with`, release-варианты
+    `remastered/live/acoustic/radio/edit/edition/version/
+    remix/mix/demo/take`, плюс несколько Genius-шумовых
+    токенов вроде `original/single/album/ost`).
+  * `from itertools import islice` добавлен в stdlib-
+    импорты (используется в `_classify_genius_text` для
+    early-exit на head-sample).
+  * `GeniusClient.get()`: после проверки на пустой текст
+    вызывается `_classify_genius_text(text)`. На
+    `(True, why)` возвращает `LyricsFailure("genius",
+    "page looks like a Genius list/index (<why>)")`.
+    После индексации-фильтра извлекаются
+    `r_title = song.title or title` и `r_artist =
+    _extract_name(primary, default=artist)`, вызывается
+    `_is_genius_match(title, artist, r_title, r_artist)`,
+    и на `(False, mismatch_why)` возвращает
+    `LyricsFailure("genius", f"song mismatch: {mismatch_why}")`.
+  * **Удалено:** `LyricsFetcher._looks_instrumental`
+    static-method и скомпилированный `_INSTRUMENTAL_TITLE_RE`
+    regex (нет внешних вызывающих — title-tag шорткат был
+    *задуман*, но никогда не подключён к `process_one`;
+    regex оставался осиротевшим с v1.1.0). Тройка
+    `_INSTRUMENTAL_FILENAME_PATTERNS` /
+    `_INSTRUMENTAL_FILENAME_RE` /
+    `_filename_blocks_audio` (активна на audio-ветке с
+    v1.1.0) не тронута.
+  * Лидирующий комментарий `LyricsFetcher.fetch()`:
+    устаревшая формулировка про "instrumental title-tag
+    short-circuit lives here" заменена на актуальное
+    состояние (filename-based, гейтится на `audio`-ветке
+    через `_filename_blocks_audio`).
+* `lyricsfag_lib/settings.py`:
+  * Удалены `_VALID_DEMUCS` frozenset и ветка санитизации
+    ключа `demucs` в `sanitize()`. Schema-docstring
+    обновлён короткой заметкой, что pre-v1.1.0
+    `settings.json`-файлы с ключом `demucs` молча
+    отбрасываются.
+  * Module-docstring: исправлен `SyntaxWarning: invalid
+    escape sequence` — три Windows-path примера изменены
+    с `%APPDATA%\LyricsFAG\…` на
+    `%APPDATA%\\LyricsFAG\\…` (docstring теперь
+    рендерит реальные backslash'и, файл проходит
+    `-W error::SyntaxWarning`).
+* `lyricsfag.py`:
+  * `_build_audio_analyzer` упрощён на прямой
+    `args.audio_model` / `args.audio_model_path or None` /
+    `args.device` доступ (идиома getter-with-default была
+    избыточной, так как эти три регистрируются в
+    `build_parser`). Литеральный `enable_demucs=True`
+    хардкоден с inline-комментарием, поясняющим инвариант
+    обязательности demucs.
+  * "Demucs on CPU is slow" варнинг больше не гейтится на
+    `getattr(args, "enable_demucs", True)` — то же
+    допущение обязательности demucs.
+* `lyricsfag_gui.py`:
+  * Удалены два устаревших комментария
+    `(demucs_label removed in v1.1.0 -- demucs is now
+    mandatory)`, ссылавшихся на виджеты, удалённые в
+    v1.1.0. Они не нужны; код под ними
+    (audio_model_path_label и т.п.) — единственная audio-
+    row.
+* `lyricsfag_lib/__init__.py`:
+  * `__version__` бамп `1.1.4 → 1.2.0`.
+
+## Обратная совместимость
+
+* **Без ломающих изменений.** Никаких изменений API или
+  схемы config-файла. CLI-флаги / виджеты GUI / ключи
+  `settings.json` не изменились. Порядок провайдеров в
+  audio и lyrics-цепочке не изменился.
+* Genius misclassification rejection (`LyricsFailure`
+  вместо молча плохого `.lrc`) — единственное видимое
+  пользователю поведенческое изменение; улучшает
+  корректность, не влияя на hit-rate для корректно-
+  тегированных аудиофайлов.
+* Cleanup-проход не удаляет функциональности и публичной
+  поверхности — `_looks_instrumental` и
+  `_INSTRUMENTAL_TITLE_RE` были приватными (`_`-prefixed)
+  хелперами без вызывающих где-либо в кодовой базе, а
+  `_VALID_DEMUCS` / `demucs`-key санитизация читала мёртвые
+  данные, потому что GUI'шные
+  `_save_settings_snapshot` /
+  `_apply_persisted_settings` никогда не персистили этот
+  ключ после v1.1.0.
+
+
+---
+
+# LyricsFAG v1.1.4 — release notes
+
+*Shipped 2026-07-07. Patch release (v1.1.3 → v1.1.4).*
+
+## TL;DR
+
+The audio stack no longer crashes on first run under PyTorch 2.6
+(the `Weights only load failed ... GLOBAL fractions.Fraction`
+`WeightsUnpickler` error is fixed via a shared, `.th`-scoped
+`torch.load` monkey-patch). The first-run Demucs download warning
+now reports correct sizes (`htdemucs_ft` is a 4-sub-model ~336 MB
+`BagOfModels`, not a single ~84 MB model; the legacy `htdemucs` is
+a single ~84 MB model, not a 5-sub-model ~420 MB bag). The
+`models/demucs/README.md` is brought in line with demucs 4.0.1
+reality in 8 places. As a bonus, the `build.bat` `TARGET=all`
+guard is fixed for older Windows batch parsers, and the
+`lyricsfag_lib/lyrics.py` instrumental short-circuit regex is
+re-anchored to explicit boundaries with the no-separator filename
+patterns (`offvocal`, `novocal`) re-added.
+
+
+## What's new
+
+### Compat: PyTorch 2.6 / demucs 4.0.1 — `Weights only load failed` no longer breaks the audio path
+
+PyTorch 2.6 changed `torch.load()`'s default `weights_only` argument
+from `False` to `True`. demucs 4.0.1 pickles its `HTDemucs` /
+`BagOfModels` weights with class references (`HTDemucs`,
+`fractions.Fraction`, and more as the unpickler walks deeper into
+the state dict) that the strict unpickler rejects, surfacing as
+`WeightsUnpickler error: Unsupported global: GLOBAL fractions.Fraction
+was not an allowed global by default`. v1.1.3 and earlier crashed
+on first run when demucs tried to load weights under PyTorch 2.6.
+
+The fix is a **`.th`-scoped** monkey-patch of `torch.load` that
+forwards `weights_only=False` only for files ending in `.th` (the
+demucs weights we just downloaded from `facebookresearch/demucs`)
+and keeps the safe PyTorch 2.6 default for every other `torch.load`
+caller in the process (e.g. faster-whisper's Silero VAD, which
+loads `*.pt` files we don't want to weaken the policy for).
+
+The patch lives in the new package-internal module
+`lyricsfag_lib/_torch_compat.py` and is applied **lazily** on
+first demucs use (so users who never enable the audio analysis
+fallback don't pay the ~3 s `import torch` cost). **Idempotent**
+and emits a one-line INFO log on first application so the
+workaround is auditable from the log:
+
+```
+INFO lyricsfag_lib._torch_compat: torch.load monkey-patch active for .th files
+(PyTorch 2.6 weights_only workaround for demucs 4.0.1)
+```
+
+Both call sites (`DemucsIsolator._ensure_separator` in
+`lyricsfag_lib/audio_analysis.py` and the
+`scripts/download_demucs_model.py --verify` gate) now share the
+single implementation, so the library and the script can no longer
+drift.
+
+### Fix: first-run Demucs download warning reported inverted sizes
+
+`_DEMUCS_DOWNLOAD_HINTS_MB` in `lyricsfag_lib/audio_analysis.py` had
+its two entries swapped:
+
+* `htdemucs_ft` was advertised as **~84 MB**; in demucs 4.0.1 it is
+  actually a `BagOfModels` of 4 sub-models (~336 MB total:
+  4 × ~84 MB).
+* `htdemucs` was advertised as **~420 MB**; in demucs 4.0.1 it is
+  actually a single pretrained `HTDemucs` (~84 MB).
+
+The numbers fed the `First run will download ~N MB total` WARNING
+that fires once on a fresh install. v1.1.4 corrects the values so
+the WARNING now reads:
+
+* `htdemucs_ft` (default) → `~336 MB`
+* `htdemucs` (legacy single-model variant) → `~84 MB`
+
+The pre-existing comment block above the dict (which made the same
+inverted claim) is also updated to match demucs 4.0.1 reality.
+
+### Docs: `models/demucs/README.md` corrected for demucs 4.0.1
+
+The README still described the pre-4.0.1 layout (where `htdemucs`
+was a 5-sub-model bag) in 8 places. v1.1.4 updates the Quick
+reference table, the "Note — default Demucs model" callout, the
+"Which Demucs model?" paragraph, the "Why is this folder empty?"
+section, the size comparison, the "End-user experience" bullet, the
+PyInstaller `--onefile` quirk bullet, and the "Verification step"
+explanation to match demucs 4.0.1 reality.
+
+The size-comparison table now also cites the actual demucs YAML
+contents (`htdemucs_ft.yaml` lists 4 sub-models; `htdemucs.yaml`
+lists 1) so the per-model footprint claim is grep-able from the
+YAML rather than relying on observed disk size.
+
+### Build: `build.bat` `TARGET=all` guard fixed for older Windows batch parsers
+
+`build.bat` had a parenthesised `if ... ( ... )` block guarding
+`rmdir /s /q build` + `rmdir /s /q dist` under the `all` target.
+The parenthesised form triggered `. was unexpected at this time` on
+some Windows batch parser versions. v1.1.4 splits the block into
+two single-line compound-`if` statements (semantics identical:
+clean `build\` + `dist\` only when `TARGET=all`).
+
+### Lyrics: `INSTRUMENTAL_FILENAME_RE` re-anchored + no-separator patterns re-added
+
+The compiled regex in `lyricsfag_lib/lyrics.py` had its boundary
+class reverted from the v1.1.2 / v1.1.3 `r"\b(...)"` form back to
+the explicit `r"(?:^|[\s\-_.])(...)(?:$|[\s\-_.])"` form. The
+explicit anchors keep the boundary semantics grep-able for
+downstream tooling and avoid the `\b` corner cases the v1.1.2
+hotfix worked around (the v1.1.3 review flagged the `\b` form as
+over-eager on certain filename shapes).
+
+`offvocal` and `novocal` are also re-added to
+`_INSTRUMENTAL_FILENAME_PATTERNS` as belt-and-suspenders entries
+for all-lowercase filenames like `songoffvocal` where the CamelCase
+normalisation split doesn't fire. The comment above the pattern
+list is updated to explain the rationale: the re-adds were dead
+code under the `\b` boundary, but the v1.1.4 explicit-boundary
+form is reachable for them again.
+
+
+## Upgrade notes
+
+* **No code-level migration is required.** Drop-in upgrade from
+  v1.1.3 — settings.json still loads cleanly, CLI flags / GUI
+  widgets are unchanged.
+* The `.th`-scoped `torch.load` monkey-patch is process-global.
+  If you embed LyricsFAG in a process that does its own
+  `torch.load` policy, the patch will forward `weights_only=False`
+  for any `*.th` file you load via `torch.load(...)` too. In the
+  unlikely event this matters, your own `torch.load` calls can pin
+  `weights_only=True` explicitly and the patch will honour your
+  value.
+* The first-run Demucs WARNING now shows the correct download size.
+  If you've already cached weights, the WARNING is suppressed and
+  you won't see any change in behaviour.
+* PyInstaller users rebuilding the .exe get the same ~50 MB
+  (lite) / ~3.5 GB (portable) sizes as v1.1.3; no new deps, no
+  removed deps. `requirements.txt` and `requirements-audio.txt`
+  are unchanged.
+
+
+## Files changed
+
+* `lyricsfag_lib/_torch_compat.py` — **new file**, the shared
+  `.th`-scoped `torch.load` monkey-patch.
+* `lyricsfag_lib/audio_analysis.py` — `DemucsIsolator._ensure_separator`
+  now uses the shared monkey-patch (no inline duplicate);
+  `_DEMUCS_DOWNLOAD_HINTS_MB` values corrected
+  (`htdemucs_ft` 84→336, `htdemucs` 420→84) and the comment block
+  above the dict updated.
+* `scripts/download_demucs_model.py` — same monkey-patch import
+  (with `echo_to_stderr=True` so the confirmation line is visible
+  from the CLI); `sys.path` manipulation so `python scripts/...py`
+  from any cwd can import `lyricsfag_lib`; rewritten
+  pre-seed-and-verify flow (delegates to `demucs.pretrained.get_model`
+  + mirrors the YAML + per-hash `.th` files into `models/demucs/`
+  from the native torch-hub cache).
+* `models/demucs/README.md` — 8 places updated to match demucs
+  4.0.1.
+* `build.bat` — `TARGET=all` guard split into two compound-`if`
+  lines (Windows batch parser compatibility).
+* `lyricsfag_lib/lyrics.py` — `INSTRUMENTAL_FILENAME_RE`
+  re-anchored to explicit `(?:^|[\s\-_.])` boundaries; `offvocal`
+  and `novocal` patterns re-added to
+  `_INSTRUMENTAL_FILENAME_PATTERNS`.
+
+
+## Backward compatibility
+
+* **Non-breaking.** No API or config-file changes. Settings.json
+  from v1.1.3 still loads cleanly. The CLI / GUI surface is
+  unchanged.
+* The `.th`-scoped `torch.load` patch is the only behavioural
+  change in the runtime library; it activates only on `.th` paths,
+  leaves the safe PyTorch 2.6 default for everything else, and
+  emits an INFO log line so the workaround is auditable. Users with
+  cached Demucs weights see no behaviour change at all (the WARNING
+  is suppressed when the cache is warm).
+* The `_DEMUCS_DOWNLOAD_HINTS_MB` fix changes the WARNING text but
+  not the underlying download behaviour (the model weights
+  themselves were always ~336 MB / ~84 MB — only the user-facing
+  message was wrong).
+
+
+---
+
+# LyricsFAG v1.1.4 — заметки о релизе
+
+*Выпущено 2026-07-07. Patch-релиз (v1.1.3 → v1.1.4).*
+
+## TL;DR
+
+Аудио-стек больше не падает на первом запуске под PyTorch 2.6
+(ошибка `Weights only load failed ... GLOBAL fractions.Fraction`
+из `WeightsUnpickler` исправлена через общий, `.th`-scoped
+monkey-patch на `torch.load`). WARNING про объём Demucs-весов при
+первом запуске теперь показывает корректные числа (`htdemucs_ft` —
+это `BagOfModels` из 4 sub-models на ~336 МБ, а не одна модель на
+~84 МБ; legacy `htdemucs` — одна модель на ~84 МБ, а не 5-sub-model
+bag на ~420 МБ). `models/demucs/README.md` приведён в соответствие
+с реальностью demucs 4.0.1 в 8 местах. Бонусом: `build.bat`-guard
+для `TARGET=all` исправлен под старые Windows batch-парсеры, а
+short-circuit-regex для инструменталов в `lyricsfag_lib/lyrics.py`
+пере-анкерован к явным границам с возвратом no-separator
+паттернов (`offvocal`, `novocal`).
+
+
+## Что нового
+
+### Совместимость: PyTorch 2.6 / demucs 4.0.1 — `Weights only load failed` больше не ломает аудио-путь
+
+PyTorch 2.6 поменял дефолт `weights_only` в `torch.load()` с
+`False` на `True`. demucs 4.0.1 пиклить `HTDemucs` /
+`BagOfModels` веса с ссылками на классы (`HTDemucs`,
+`fractions.Fraction` и другие, по мере того как анпиклер
+углубляется в state dict), которые строгий анпиклер отвергает, что
+выливается в `WeightsUnpickler error: Unsupported global: GLOBAL
+fractions.Fraction was not an allowed global by default`. v1.1.3
+и более ранние падали на первом запуске, когда demucs пытался
+загрузить веса под PyTorch 2.6.
+
+Фикс — это **`.th`-scoped** monkey-patch на `torch.load`,
+пробрасывающий `weights_only=False` только для файлов с расширением
+`.th` (это веса demucs, которые мы только что скачали с
+`facebookresearch/demucs`) и сохраняющий безопасный PyTorch 2.6
+дефолт для всех остальных вызовов `torch.load` в процессе
+(например, Silero VAD в faster-whisper, который грузит `*.pt`
+файлы — для них политику ослаблять не нужно).
+
+Патч живёт в новом package-internal модуле
+`lyricsfag_lib/_torch_compat.py` и применяется **лениво** при
+первом использовании demucs (так что пользователи, которые не
+включают аудио-анализ, не платят ~3 с за `import torch`).
+**Идемпотентный**, при первом применении логирует одну INFO-строку,
+так что воркэраунд аудитабелен из лога:
+
+```
+INFO lyricsfag_lib._torch_compat: torch.load monkey-patch active for .th files
+(PyTorch 2.6 weights_only workaround for demucs 4.0.1)
+```
+
+Оба call-сайта (`DemucsIsolator._ensure_separator` в
+`lyricsfag_lib/audio_analysis.py` и gate-`--verify` в
+`scripts/download_demucs_model.py`) теперь шарят единственную
+реализацию, так что библиотека и скрипт больше не могут
+разъехаться.
+
+### Фикс: WARNING про объём Demucs при первом запуске показывал инвертированные числа
+
+В `_DEMUCS_DOWNLOAD_HINTS_MB` в `lyricsfag_lib/audio_analysis.py`
+значения для двух моделей были перепутаны:
+
+* `htdemucs_ft` рекламировался как **~84 МБ**; в demucs 4.0.1 это
+  на самом деле `BagOfModels` из 4 sub-models (~336 МБ суммарно:
+  4 × ~84 МБ).
+* `htdemucs` рекламировался как **~420 МБ**; в demucs 4.0.1 это
+  на самом деле одна предобученная `HTDemucs` (~84 МБ).
+
+Эти числа попадали в WARNING `First run will download ~N MB total`,
+который срабатывает один раз на свежей установке. v1.1.4
+исправляет значения, так что WARNING теперь читается:
+
+* `htdemucs_ft` (по умолчанию) → `~336 МБ`
+* `htdemucs` (legacy-вариант с одной моделью) → `~84 МБ`
+
+Пре-существующий комментарий-блок над словарём (в котором было то
+же инвертированное утверждение) тоже обновлён под реальность
+demucs 4.0.1.
+
+### Документация: `models/demucs/README.md` исправлен под demucs 4.0.1
+
+README до сих пор описывал pre-4.0.1 раскладку (где `htdemucs`
+был 5-sub-model bag'ом) в 8 местах. v1.1.4 обновляет Quick
+reference-таблицу, callout "Note — default Demucs model",
+параграф "Which Demucs model?", секцию "Why is this folder empty?",
+size comparison, буллет "End-user experience", буллет PyInstaller
+`--onefile` quirk и объяснение в "Verification step" — всё
+приведено в соответствие с реальностью demucs 4.0.1.
+
+Size-comparison-таблица теперь также цитирует реальное содержимое
+YAML-дескрипторов demucs (`htdemucs_ft.yaml` перечисляет 4
+sub-models; `htdemucs.yaml` — 1), так что утверждение про
+per-model футпринт грепабельно прямо из YAML, а не опирается на
+наблюдаемый размер на диске.
+
+### Сборка: `build.bat`-guard для `TARGET=all` исправлен под старые Windows batch-парсеры
+
+`build.bat` имел parenthesised `if ... ( ... )`-блок, охраняющий
+`rmdir /s /q build` + `rmdir /s /q dist` под целью `all`.
+Parenthesised форма триггерила `. was unexpected at this time`
+на некоторых версиях Windows batch-парсера. v1.1.4 разбивает
+блок на две однострочные compound-`if` инструкции (семантика
+идентична: чистить `build\` + `dist\` только когда `TARGET=all`).
+
+### Lyrics: `INSTRUMENTAL_FILENAME_RE` пере-анкеруется + no-separator паттерны возвращаются
+
+Скомпилированный regex в `lyricsfag_lib/lyrics.py` получил
+обратный переход от v1.1.2 / v1.1.3 формы `r"\b(...)"` к явной
+форме `r"(?:^|[\s\-_.])(...)(?:$|[\s\-_.])"`. Явные анкеры
+делают семантику границ грепабельной для downstream-тулинга и
+уходят от `\b`-краевых случаев, которые v1.1.2-hotfix обходил
+(v1.1.3-ревьюер отметил `\b`-форму как чрезмерно жадную на
+некоторых формах имён файлов).
+
+`offvocal` и `novocal` также возвращены в
+`_INSTRUMENTAL_FILENAME_PATTERNS` как belt-and-suspenders-записи
+для полностью нижне-регистровых имён файлов вроде `songoffvocal`,
+где CamelCase-сплит нормализации не срабатывает. Комментарий над
+списком паттернов обновлён с пояснением рационала: эти re-add'ы
+были мёртвым кодом под `\b`-границей, но v1.1.4 explicit-boundary
+форма снова достижима для них.
+
+
+## Заметки по обновлению
+
+* **Кодовой миграции не требуется.** Drop-in апгрейд с v1.1.3 —
+  settings.json по-прежнему загружается чисто, CLI-флаги / виджеты
+  GUI не изменились.
+* `.th`-scoped `torch.load` monkey-patch — process-global. Если вы
+  встраиваете LyricsFAG в процесс, у которого своя политика
+  `torch.load`, патч пробросит `weights_only=False` и для ваших
+  `*.th`-файлов, загружаемых через `torch.load(...)` тоже. В
+  маловероятном случае, если это важно, ваши собственные вызовы
+  `torch.load` могут явно пинить `weights_only=True`, и патч это
+  значение уважает.
+* WARNING про объём Demucs при первом запуске теперь показывает
+  корректный размер. Если у вас уже закешированы веса, WARNING
+  подавлен и вы не увидите никаких изменений в поведении.
+* Пользователи PyInstaller, пересобирающие .exe, получат те же
+  ~50 МБ (lite) / ~3.5 ГБ (portable), что и в v1.1.3; новых
+  зависимостей нет, удалённых нет. `requirements.txt` и
+  `requirements-audio.txt` не изменились.
+
+
+## Изменённые файлы
+
+* `lyricsfag_lib/_torch_compat.py` — **новый файл**, общий
+  `.th`-scoped monkey-patch на `torch.load`.
+* `lyricsfag_lib/audio_analysis.py` — `DemucsIsolator._ensure_separator`
+  теперь использует общий monkey-patch (без inline-дубликата);
+  значения `_DEMUCS_DOWNLOAD_HINTS_MB` исправлены
+  (`htdemucs_ft` 84→336, `htdemucs` 420→84) и комментарий-блок
+  над словарём обновлён.
+* `scripts/download_demucs_model.py` — тот же monkey-patch import
+  (с `echo_to_stderr=True`, чтобы строка подтверждения была видна
+  из CLI); `sys.path`-манипуляция, чтобы `python scripts/...py`
+  из любого cwd мог импортировать `lyricsfag_lib`; переписанный
+  pre-seed-and-verify flow (делегирует `demucs.pretrained.get_model`
+  + зеркалит YAML и per-hash `.th`-файлы в `models/demucs/` из
+  нативного torch-hub кеша).
+* `models/demucs/README.md` — 8 мест обновлено под demucs 4.0.1.
+* `build.bat` — `TARGET=all` guard разбит на две compound-`if`
+  строки (Windows batch parser compatibility).
+* `lyricsfag_lib/lyrics.py` — `INSTRUMENTAL_FILENAME_RE` пере-анкерован
+  к явным `(?:^|[\s\-_.])`-границам; паттерны `offvocal` и
+  `novocal` возвращены в `_INSTRUMENTAL_FILENAME_PATTERNS`.
+
+
+## Обратная совместимость
+
+* **Без ломающих изменений.** API и схема config-файла не
+  изменились. Settings.json от v1.1.3 по-прежнему загружается
+  чисто. CLI / GUI-поверхность не изменилась.
+* `.th`-scoped `torch.load`-патч — единственное поведенческое
+  изменение в runtime-библиотеке; он активируется только на
+  `.th`-путях, сохраняет безопасный PyTorch 2.6 дефолт для всего
+  остального и логирует INFO-строку, так что воркэраунд
+  аудитабелен. Пользователи с закешированными Demucs-весами не
+  видят никаких изменений в поведении (WARNING подавлен, когда
+  кеш прогрет).
+* Фикс `_DEMUCS_DOWNLOAD_HINTS_MB` меняет текст WARNING'а, но не
+  базовое поведение загрузки (сами веса модели всегда были
+  ~336 МБ / ~84 МБ — неправильным было только пользовательское
+  сообщение).
+
+
+---
+
+# LyricsFAG v1.1.3 — release notes
+
+*Shipped 2026-07-06. Patch release (v1.1.2 → v1.1.3).*
+
+## TL;DR
+
+The `lite` PyInstaller build is now actually lite (~50 MB, no audio
+support) and `build.bat` no longer clobbers the portable exes when
+building both variants. `requirements.txt` was split into a core
+`requirements.txt` and an optional `requirements-audio.txt`; the
+latter is only installed by `build-portable.bat` (and by dev installs
+that want the full audio stack on the command line).
+
+
+## What's new
+
+### Build: `lite` is now a real ~50 MB .exe (no audio analysis)
+
+* `requirements.txt` is split into two files. The core file
+  (`requirements.txt`) keeps `mutagen`, `requests`, `lyricsgenius` —
+  the bare minimum both builds need. The audio stack
+  (`faster-whisper`, `demucs`, `scipy`, and the transitive `torch`
+  dependency) moves to a new `requirements-audio.txt`.
+* `build-lite.bat` no longer installs `requirements-audio.txt`,
+  so the resulting `LyricsFAG-Lite.exe` / `LyricsFAG-GUI-Lite.exe`
+  no longer bundle `torch` (~3.8 GB on Windows) and stay at the
+  documented ~50 MB footprint. The PyInstaller invocation drops
+  `--hidden-import faster_whisper` since the package is no longer
+  present.
+* `build-portable.bat` now installs `requirements-audio.txt` instead
+  of installing `faster-whisper` and `demucs` directly; otherwise
+  the build is unchanged.
+* **Behavioural change:** the **lite** build no longer supports
+  `--use-audio-analysis` / the GUI "Use audio analysis" checkbox.
+  A lite user who enables the audio chain sees a `LyricsFailure`
+  with a hint pointing at the portable build instead of the
+  misleading `pip install faster-whisper` (which can't be done
+  inside a read-only bundled .exe). The new
+  `lyricsfag_lib.audio_analysis._missing_audio_hint` helper
+  centralises the new error string so the fast-whisper + demucs
+  failure sites stay in lockstep.
+* **Documented size update:** the portable build is now correctly
+  advertised as **~3.5 GB** (not the previous, wildly optimistic
+  "~600 MB") because `torch` alone is ~3.8 GB. The table in
+  `README.md` → "Building the executable" now reflects the real
+  numbers and a short footnote explains why portable is so much
+  bigger than lite.
+
+### Build: `build.bat` orchestrator no longer wipes the portable exes
+
+* Previously, each variant script (`build-lite.bat` and
+  `build-portable.bat`) started with `rmdir /s /q dist`, which
+  meant the second variant silently deleted the first variant's
+  outputs. Running `build.bat` (default = `all`) left the user
+  with only the **lite** exes in `dist\` and a ~6.4 GB
+  `dist\LyricsFAG-Portable.exe` + `-GUI-Portable.exe` pair
+  silently deleted — matching the user bug report "two huge
+  exes in dist, but I expected both portable and lite".
+* Fix: the `dist\` / `build\` cleanup moved to the **top** of
+  `build.bat` (the orchestrator), but only runs when the target
+  is `all` (`if /i "%TARGET%"=="all"`), so single-target builds
+  (`build.bat lite` or `build.bat portable` standalone) preserve
+  the other variant's outputs. Each variant script now cleans
+  **only** its own previous `dist\<Name>.exe` + `<Name>.spec` at
+  the top so a re-run gets a fresh PyInstaller pass without
+  stale configs, but doesn't touch the other variant's outputs.
+  As a result, `build.bat all` now produces **four** exes in
+  `dist\` instead of two: `LyricsFAG-Portable.exe` +
+  `-GUI-Portable.exe` (each ~3.5 GB) and `LyricsFAG-Lite.exe` +
+  `-GUI-Lite.exe` (each ~50 MB).
+
+
+## Upgrade notes
+
+* Existing users who re-run `build.bat` after upgrading will see
+  the orchestrator wipe the old `dist\` (~6.4 GB) before producing
+  the new four-exe layout. This is intentional: the new
+  lite-build contract is incompatible with the old bloated
+  ~3.2 GB lite .exe, and the orchestrator no longer preserves
+  stale portable exes from a previous run.
+* Dev installs that previously used `pip install -r
+  requirements.txt` to get the full audio stack now need `pip
+  install -r requirements.txt -r requirements-audio.txt`. The
+  Quick-start in `README.md` and `README.ru.md` was updated to
+  reflect this.
+* Users who only need LRCLIB + Genius are unaffected by any of
+  this — the lite build still does everything they need at
+  ~50 MB.
+
+
+## Files changed
+
+* `build.bat` — move the `dist\` / `build\` cleanup to the
+  orchestrator (top of the script, runs once before any variant
+  starts).
+* `build-lite.bat` — drop the wholesale `dist\` / `build\`
+  cleanup; drop the `pip install faster-whisper` and the
+  `--hidden-import faster_whisper` PyInstaller flag; add a
+  per-variant cleanup of `dist\LyricsFAG-Lite.exe` +
+  `dist\LyricsFAG-GUI-Lite.exe` + the matching `.spec` files
+  (so a standalone re-run is clean but the portable exes
+  survive); rewrite the header comment to reflect the new
+  "no audio" contract.
+* `build-portable.bat` — drop the wholesale `dist\` / `build\`
+  cleanup; add a per-variant cleanup of
+  `dist\LyricsFAG-Portable.exe` + `dist\LyricsFAG-GUI-Portable.exe`
+  + the matching `.spec` files (so a standalone re-run is clean
+  but the lite exes survive); replace the explicit
+  `pip install faster-whisper` / `pip install demucs` lines with
+  a single `pip install -r requirements-audio.txt`.
+* `requirements.txt` — slim down to the three core deps
+  (`mutagen`, `requests`, `lyricsgenius`); point at
+  `requirements-audio.txt` in a leading comment.
+* `requirements-audio.txt` — **new file** with `faster-whisper`,
+  `demucs`, `scipy` and a leading comment explaining the split
+  and the install contract.
+* `lyricsfag_lib/audio_analysis.py` — add the
+  `_missing_audio_hint(pkg)` helper and route the
+  `FasterWhisperAnalyzer.get` / `DemucsIsolator._ensure_separator`
+  failure sites through it so a frozen-build lite user gets a
+  "use the portable build" hint instead of `pip install ...`.
+* `lyricsfag_lib/__init__.py` — `__version__` 1.1.2 → 1.1.3.
+* `README.md` / `README.ru.md` — Quick-start now installs
+  `requirements-audio.txt` separately for the audio path; the
+  "Building the executable" sizes table is updated with the real
+  ~50 MB / ~3.5 GB numbers and a behavioural-change note about
+  the lite build no longer supporting audio analysis; the
+  project layout tree adds `requirements-audio.txt`.
+* `models/demucs/README.md` — leading note about the lite
+  build not bundling Demucs/torch.
+
+
+## Backward compatibility
+
+* **Breaking** for users who used `--use-audio-analysis` on the
+  **lite** .exe (they need the portable .exe now; the runtime
+  error message tells them so).
+* Non-breaking for everyone else. LRCLIB + Genius still work
+  identically on both variants. The CLI flags / GUI widgets /
+  config file schema are unchanged. Settings.json from v1.1.2
+  still loads cleanly.
+
+
+---
+
+# LyricsFAG v1.1.3 — заметки о релизе
+
+*Выпущено 2026-07-06. Patch-релиз (v1.1.2 → v1.1.3).*
+
+## TL;DR
+
+`lite`-сборка PyInstaller теперь действительно lite (~50 МБ, без
+поддержки аудио), а `build.bat` больше не затирает portable-.exe,
+когда собирает оба варианта подряд. `requirements.txt` разделён на
+основной `requirements.txt` и опциональный `requirements-audio.txt`;
+последний ставится только `build-portable.bat` (и dev-установками,
+которым нужен полный аудио-стек в командной строке).
+
+
+## Что нового
+
+### Сборка: `lite` теперь настоящий .exe на ~50 МБ (без аудио-анализа)
+
+* `requirements.txt` разделён на два файла. Основной
+  (`requirements.txt`) хранит `mutagen`, `requests`,
+  `lyricsgenius` — минимум, нужный обеим сборкам. Аудио-стек
+  (`faster-whisper`, `demucs`, `scipy` и транзитивный `torch`)
+  переехал в новый `requirements-audio.txt`.
+* `build-lite.bat` больше не ставит `requirements-audio.txt`,
+  поэтому итоговые `LyricsFAG-Lite.exe` /
+  `LyricsFAG-GUI-Lite.exe` больше не бандлят `torch` (~3.8 ГБ на
+  Windows) и остаются в задокументированных ~50 МБ. Из вызова
+  PyInstaller убран `--hidden-import faster_whisper`, так как
+  пакет больше не установлен.
+* `build-portable.bat` теперь ставит `requirements-audio.txt`
+  вместо прямых `pip install faster-whisper` / `pip install
+  demucs`; в остальном сборка не изменилась.
+* **Изменение поведения:** **lite**-сборка больше **не**
+  поддерживает `--use-audio-analysis` и чекбокс "Use audio
+  analysis" в GUI. Lite-пользователь, который включит аудио-цепь,
+  увидит `LyricsFailure` с подсказкой про portable-сборку — а
+  не вводящую в заблуждение `pip install faster-whisper` (что
+  нельзя сделать в read-only собранном .exe). Новый хелпер
+  `lyricsfag_lib.audio_analysis._missing_audio_hint`
+  централизует строку ошибки, чтобы места падений в
+  fast-whisper и demucs оставались в синхронизации.
+* **Обновление задокументированного размера:** portable теперь
+  корректно заявлен как **~3.5 ГБ** (а не оптимистичные
+  прошлые ~600 МБ), потому что один только `torch` весит
+  ~3.8 ГБ. Таблица в `README.md` → "Сборка .exe" теперь
+  отражает реальные цифры и короткую сноску о том, почему
+  portable так сильно больше lite.
+
+### Сборка: `build.bat`-оркестратор больше не затирает portable-.exe
+
+* Раньше каждый вариант (`build-lite.bat` и
+  `build-portable.bat`) начинал с `rmdir /s /q dist`, и второй
+  вариант молча удалял выход первого. Запуск `build.bat`
+  (по умолчанию = `all`) оставлял пользователю в `dist\` только
+  **lite**-.exe, а пара `LyricsFAG-Portable.exe` +
+  `-GUI-Portable.exe` на ~6.4 ГБ молча удалялась — что и
+  соответствует баг-репорту "два огромных exe в dist, а
+  должно быть две версии".
+* Фикс: очистка `dist\` / `build\` / `*.spec` переехала в
+  **начало** `build.bat` (в оркестратор), так что выполняется
+  ровно один раз до старта любого варианта. Скрипты вариантов
+  больше не трогают `dist\` или `build\`. В результате
+  `build.bat all` теперь даёт **четыре** exe в `dist\`
+  вместо двух: `LyricsFAG-Portable.exe` + `-GUI-Portable.exe`
+  (каждый ~3.5 ГБ) и `LyricsFAG-Lite.exe` + `-GUI-Lite.exe`
+  (каждый ~50 МБ).
+
+
+## Заметки по обновлению
+
+* Существующие пользователи, которые перезапустят `build.bat`
+  после апгрейда, увидят, что оркестратор затирает старый
+  `dist\` (~6.4 ГБ) до генерации нового лейаута на четыре
+  exe. Это намеренно: новый lite-контракт несовместим со
+  старым раздутым lite-.exe на ~3.2 ГБ, и оркестратор больше
+  не сохраняет устаревшие portable-.exe от прошлого запуска.
+* Dev-установки, которые раньше использовали
+  `pip install -r requirements.txt` для получения полного
+  аудио-стека, теперь должны использовать
+  `pip install -r requirements.txt -r requirements-audio.txt`.
+  Quick-start в `README.md` и `README.ru.md` обновлён, чтобы
+  это отражать.
+* Те, кому нужен только LRCLIB + Genius, не заметят никаких
+  изменений — lite по-прежнему делает всё, что им нужно, на
+  ~50 МБ.
+
+
+## Изменённые файлы
+
+* `build.bat` — очистка `dist\` / `build\` переехала в
+  оркестратор (в начало скрипта, выполняется один раз до
+  старта любого варианта).
+* `build-lite.bat` — убрана локальная очистка `dist\` /
+  `build\`; убраны `pip install faster-whisper` и флаг
+  PyInstaller `--hidden-import faster_whisper`; переписан
+  заголовочный комментарий под новый "без аудио" контракт.
+* `build-portable.bat` — убрана локальная очистка `dist\` /
+  `build\`; явные `pip install faster-whisper` /
+  `pip install demucs` заменены на одну строку
+  `pip install -r requirements-audio.txt`.
+* `requirements.txt` — сокращён до трёх основных зависимостей
+  (`mutagen`, `requests`, `lyricsgenius`); в шапочном
+  комментарии указано на `requirements-audio.txt`.
+* `requirements-audio.txt` — **новый файл** с `faster-whisper`,
+  `demucs`, `scipy` и шапочным комментарием, объясняющим
+  разбиение и контракт установки.
+* `lyricsfag_lib/audio_analysis.py` — добавлен хелпер
+  `_missing_audio_hint(pkg)`; оба места падения
+  (`FasterWhisperAnalyzer.get` / `DemucsIsolator._ensure_separator`)
+  пропущены через него, чтобы замороженный lite-пользователь
+  получал подсказку "используйте portable-сборку" вместо
+  `pip install ...`.
+* `lyricsfag_lib/__init__.py` — `__version__` 1.1.2 → 1.1.3.
+* `README.md` / `README.ru.md` — Quick-start теперь ставит
+  `requirements-audio.txt` отдельной строкой для аудио-пути;
+  таблица размеров в "Сборка .exe" обновлена реальными
+  цифрами ~50 МБ / ~3.5 ГБ и заметкой об изменении поведения
+  lite-сборки (без поддержки аудио-анализа); в дерево
+  раскладки проекта добавлен `requirements-audio.txt`.
+* `models/demucs/README.md` — вводная заметка о том, что
+  lite-сборка не бандлит Demucs/torch.
+
+
+## Обратная совместимость
+
+* **Ломающее** изменение для тех, кто использовал
+  `--use-audio-analysis` на **lite**-.exe (теперь нужен
+  portable-.exe; runtime-сообщение об ошибке само об этом
+  скажет).
+* Для остальных — без изменений. LRCLIB + Genius работают
+  идентично на обоих вариантах. CLI-флаги / виджеты GUI /
+  схема config-файла не изменились. settings.json от v1.1.2
+  по-прежнему загружается чисто.
+
+
+---
+
+# Release 1.1.2
+
+Hotfix: `INSTRUMENTAL_FILENAME_RE` boundary class widened from a
+narrow ASCII set to Unicode-aware `\b`, so filenames with parens,
+brackets, braces, quotes, colons, or commas around the keyword now
+correctly short-circuit the audio branch.
+
+## What's new
+
+### Fix: filenames like `Song (Off Vocal).flac` are no longer sent to demucs+whisper
+
+v1.1.0's filename-based short-circuit for the audio branch compiled
+its keyword anchors with the narrow ASCII boundary class `[\s\-_.]`
+(whitespace, hyphen, underscore, dot). That class does NOT include
+parens, brackets, braces, quotes, colons, or commas — so filenames
+where the keyword is wrapped in any of those punctuation chars
+silently failed the boundary check and the track fell through to
+the demucs+whisper audio branch.
+
+User's bug report: `Song (Off Vocal).flac` and similar files were
+still being processed with demucs+whisper despite the filename
+clearly marking them as off-vocal.
+
+The fix replaces `[\s\-_.]` with `\b` (Unicode word boundary) in
+`_INSTRUMENTAL_FILENAME_RE`. Python 3's default `re` module is
+Unicode-aware, so `\b` correctly treats parens, brackets, braces,
+quotes, colons, commas, Cyrillic letters, and CJK as word
+boundaries. All the user's reported cases now match:
+
+- `Song (Off Vocal).flac` → BLOCKED
+- `Song [Off Vocal].flac` → BLOCKED
+- `Song {Backing Track}.flac` → BLOCKED
+- `Song "Off Vocal".flac` → BLOCKED
+- `Song, Off Vocal.flac` → BLOCKED
+- `Song : Off Vocal.flac` → BLOCKED
+- `[Instrumental] Take On Me.flac` → BLOCKED
+- Cyrillic variants (`Песня (Караоке).flac`, `Песня-Инструментал.flac`,
+  CamelCase `ПесняИнструментал.flac`) → BLOCKED
+
+The false-positive guards are preserved:
+
+- `tracklist.flac` → still does NOT match `backing track`
+- `TheInstrumentalization.flac` → still does NOT match
+  `instrumental` (no word boundary between `l` and `i`)
+- `Inoffensive.flac` → still does NOT match `off vocal` (no space)
+- `Nonvocal.flac` → still does NOT match `no vocal` (no word
+  boundary between `n` and `o`)
+
+The change is in `lyricsfag_lib/lyrics.py` — only the two regex
+boundary lines (`r"\b("` and `r")\b"`) inside the compiled
+`_INSTRUMENTAL_FILENAME_RE`. The pattern list, the CamelCase
+normalisation split (ASCII + Cyrillic), and the
+`_filename_blocks_audio` method are unchanged.
+
+### Cleanup: dead `offvocal` / `novocal` patterns removed
+
+The previous session added `offvocal` and `novocal` to
+`_INSTRUMENTAL_FILENAME_PATTERNS` as belt-and-suspenders entries
+for all-lowercase filenames like `songoffvocal` where the
+CamelCase split doesn't fire. Those patterns cannot match with the
+new `\b` boundary (there's no word boundary between two adjacent
+word characters, e.g. between `g` and `o` in `songoffvocal`), so
+they were removed as dead code. The real-world cases (CamelCase
+`SongOffVocal`, separator-based `Song-Off-Vocal`, `Song_Off_Vocal`,
+`Song Off Vocal`) are all handled by the existing `off vocal`
+pattern + the CamelCase normalisation split + the new `\b`
+boundary.
+
+### Versioning
+
+`lyricsfag_lib.__version__` was bumped from `1.1.0` to `1.1.2` to
+sync the package version with the git tag chain (the v1.1.1 tag
+landed without bumping the constant).
+
+## Heads-up
+
+- This is a hotfix on top of v1.1.1. **Upgrade is recommended for
+  all v1.1.0 / v1.1.1 users** — the affected filenames are the
+  most common off-vocal / karaoke naming conventions.
+- v1.0.x users are unaffected.
+- The portable build is unchanged; just re-run
+  `build.bat portable` if you want a fresh `.exe` that matches this
+  tag.
+- **Known follow-up:** the comment block above the compiled regex
+  in `lyricsfag_lib/lyrics.py` (~lines 454-459) still describes the
+  old `[\s\-_.]` class and the old "cheaper than 11" pattern count.
+  The exact-match anchor for the comment update failed during the
+  fix script run due to a 2-backslash escaping issue. The code is
+  correct; the comment is just misleading. Will be addressed in a
+  v1.1.3 doc-only patch.
+
+---
+
+# Релиз 1.1.2
+
+Хотфикс: boundary-класс в `INSTRUMENTAL_FILENAME_RE` расширен с
+узкого ASCII-набора на Unicode-aware `\b`, так что имена файлов
+с круглыми/квадратными/фигурными скобками, кавычками, двоеточиями
+или запятыми вокруг ключевого слова теперь корректно шорткатят
+аудио-ветку.
+
+## What's new (RU)
+
+### Фикс: файлы вида `Song (Off Vocal).flac` больше не уходят в demucs+whisper
+
+Шорткат по имени файла для аудио-ветки в v1.1.0 якорил ключевые
+слова узким ASCII-классом `[\s\-_.]` (пробел, дефис, подчёркивание,
+точка). Этот класс НЕ включает круглые/квадратные/фигурные скобки,
+кавычки, двоеточия и запятые — поэтому имена файлов, где ключевое
+слово обёрнуто в любой из этих знаков препинания, молча проваливали
+boundary-проверку и трек уходил в аудио-ветку demucs+whisper.
+
+Баг-репорт пользователя: `Song (Off Vocal).flac` и подобные
+файлы по-прежнему обрабатывались через demucs+whisper, несмотря
+на то, что имя файла явно маркировало их как off-vocal.
+
+Фикс заменяет `[\s\-_.]` на `\b` (Unicode word boundary) в
+`_INSTRUMENTAL_FILENAME_RE`. Дефолтный `re`-модуль в Python 3
+Unicode-aware, поэтому `\b` корректно трактует круглые/квадратные/
+фигурные скобки, кавычки, двоеточия, запятые, кириллические буквы
+и CJK как границы слов. Все случаи из баг-репорта теперь
+сматчатся:
+
+- `Song (Off Vocal).flac` → BLOCKED
+- `Song [Off Vocal].flac` → BLOCKED
+- `Song {Backing Track}.flac` → BLOCKED
+- `Song "Off Vocal".flac` → BLOCKED
+- `Song, Off Vocal.flac` → BLOCKED
+- `Song : Off Vocal.flac` → BLOCKED
+- `[Instrumental] Take On Me.flac` → BLOCKED
+- Кириллические варианты (`Песня (Караоке).flac`,
+  `Песня-Инструментал.flac`, CamelCase `ПесняИнструментал.flac`)
+  → BLOCKED
+
+Защиты от false-positive сохранены:
+
+- `tracklist.flac` → по-прежнему НЕ сматчит `backing track`
+- `TheInstrumentalization.flac` → по-прежнему НЕ сматчит
+  `instrumental` (нет word boundary между `l` и `i`)
+- `Inoffensive.flac` → по-прежнему НЕ сматчит `off vocal`
+  (нет пробела)
+- `Nonvocal.flac` → по-прежнему НЕ сматчит `no vocal` (нет word
+  boundary между `n` и `o`)
+
+Изменение в `lyricsfag_lib/lyrics.py` — только две строки с
+границами regex'а (`r"\b("` и `r")\b"`) внутри скомпилированного
+`_INSTRUMENTAL_FILENAME_RE`. Список паттернов, CamelCase-сплит
+нормализации (ASCII + кириллица) и метод `_filename_blocks_audio`
+не тронуты.
+
+### Чистка: мёртвые паттерны `offvocal` / `novocal` удалены
+
+В прошлой сессии в `_INSTRUMENTAL_FILENAME_PATTERNS` добавили
+`offvocal` и `novocal` как belt-and-suspenders для полностью
+нижне-регистровых имён файлов вроде `songoffvocal`, где
+CamelCase-сплит не срабатывает. Эти паттерны не могут сматчиться
+с новой границей `\b` (между двумя соседними word-символами нет
+word boundary, например между `g` и `o` в `songoffvocal`), так что
+они были удалены как мёртвый код. Реальные случаи (CamelCase
+`SongOffVocal`, через разделитель `Song-Off-Vocal`,
+`Song_Off_Vocal`, `Song Off Vocal`) все покрываются существующим
+паттерном `off vocal` + CamelCase-сплитом нормализации + новой
+границей `\b`.
+
+### Версионирование
+
+`lyricsfag_lib.__version__` бамплен с `1.1.0` на `1.1.2`, чтобы
+синхронизировать версию пакета с цепочкой git-тегов (тег v1.1.1
+вышел без бампа константы).
+
+## Heads-up
+
+- Это хотфикс поверх v1.1.1. **Апгрейд рекомендуется всем
+  пользователям v1.1.0 / v1.1.1** — задетые имена файлов — это
+  самые распространённые соглашения об именовании off-vocal /
+  караоке.
+- Пользователи v1.0.x не задеты.
+- Portable-сборка без изменений — просто пересоберите
+  `build.bat portable`, если хочется свежий `.exe` под этот тег.
+- **Известный follow-up:** комментарий-блок над скомпилированным
+  regex'ом в `lyricsfag_lib/lyrics.py` (~строки 454-459) всё ещё
+  описывает старый класс `[\s\-_.]` и старое «дешевле 11
+  проверок». Точный anchor для обновления комментария упал во
+  время прогона fix-скрипта из-за проблемы с 2-бэкслешным
+  экранированием. Код корректен; комментарий просто слегка
+  вводит в заблуждение. Будет исправлен в v1.1.3 doc-only патче.
+
+
+---
+
+# Release 1.1.1
+
+Hotfix: GUI crashed on launch with `AttributeError` because a
+`trace_add` callback was wired up before the `StringVar` it was
+watching was constructed.
+
+## What's new
+
+### Fix: GUI no longer crashes on launch
+
+v1.1.0 added a new `Source` dropdown value (`audio`) and wired up a
+`StringVar.trace_add("write", _on_source_change)` callback to
+auto-enable the "Use audio analysis" checkbox when the user picks
+`Source = audio`. The `trace_add` call was placed at the end of the
+options row, but the `self.source_var = tk.StringVar(value="auto")`
+it was watching wasn't constructed until the source row further
+down. The trace fired before the `StringVar` existed, crashing the
+GUI on every launch with:
+
+```
+AttributeError: '_tkinter.tkapp' object has no attribute 'source_var'
+  File "E:\Projects\LyricsFAG\lyricsfag_gui.py", line 567, in _build_widgets
+      self.source_var.trace_add("write", self._on_source_change)
+```
+
+The fix moves the `trace_add` (and its comment block) to immediately
+after `self.source_var = tk.StringVar(value="auto")`. A short
+breadcrumb at the original spot notes that the trace now lives below
+the source row, so this class of "widget wired up in wrong order"
+regression is harder to reintroduce.
+
+No behaviour change beyond un-crashing the GUI:
+- `_on_source_change` handler is unchanged.
+- The persisted-settings restore flow (which fires the trace once on
+  launch when a saved `source` value is restored) still works as
+  designed in v1.1.0.
+- The `Source = audio` → auto-enable "Use audio analysis" behaviour
+  still works as designed in v1.1.0.
+
+### Versioning
+
+`lyricsfag_lib.__version__` was NOT bumped for this hotfix (the
+constant stays at `1.1.0`). The next patch that touches
+`lyricsfag_lib/__init__.py` will sync the constant with the
+v1.1.x tag chain.
+
+## Heads-up
+
+- This is a hotfix on top of v1.1.0. **Upgrade is recommended for all
+  v1.1.0 users** — the GUI is unusable without it.
+- v1.0.x users are unaffected (the crash only affects the
+  v1.1.0-added `source_var` trace).
+- The portable build is unchanged; just re-run
+  `build.bat portable` if you want a fresh `.exe` that matches this
+  tag.
+
+---
+
+# Релиз 1.1.1
+
+Хотфикс: GUI падал на старте с `AttributeError`, потому что
+колбэк `trace_add` был привязан до того, как наблюдаемый
+`StringVar` был сконструирован.
+
+## What's new (RU)
+
+### Фикс: GUI больше не падает на старте
+
+В v1.1.0 добавили новое значение `Source` (`audio`) и повесили
+колбэк `StringVar.trace_add("write", _on_source_change)`, чтобы
+при выборе `Source = audio` автоматически включать чекбокс
+«Use audio analysis». Вызов `trace_add` стоял в конце строки
+опций, но `self.source_var = tk.StringVar(value="auto")`, на
+который он подписывался, конструировался только ниже в строке
+источника. Трейс срабатывал раньше, чем `StringVar` существовал,
+и GUI падал на каждом запуске с:
+
+```
+AttributeError: '_tkinter.tkapp' object has no attribute 'source_var'
+  File "E:\Projects\LyricsFAG\lyricsfag_gui.py", line 567, in _build_widgets
+      self.source_var.trace_add("write", self._on_source_change)
+```
+
+Фикс переносит `trace_add` (и его комментарий) сразу после
+`self.source_var = tk.StringVar(value="auto")`. На старом месте
+осталась короткая пометка, что трейс теперь живёт ниже строки
+источника, — чтобы регрессия класса «виджет привязан не в том
+порядке» было сложнее повторить.
+
+Никаких поведенческих изменений, кроме починки запуска:
+- Хендлер `_on_source_change` не тронут.
+- Поток восстановления сохранённых настроек (который дёргает
+  трейс один раз на старте при восстановлении сохранённого
+  `source`) работает как задумано в v1.1.0.
+- Связка `Source = audio` → авто-включение «Use audio analysis»
+  работает как задумано в v1.1.0.
+
+### Версионирование
+
+`lyricsfag_lib.__version__` НЕ бампался в этом хотфиксе
+(константа остаётся `1.1.0`). Следующий патч, который тронет
+`lyricsfag_lib/__init__.py`, синхронизирует константу с цепочкой
+v1.1.x тегов.
+
+## Heads-up
+
+- Это хотфикс поверх v1.1.0. **Апгрейд рекомендуется всем
+  пользователям v1.1.0** — без него GUI нерабочий.
+- Пользователи v1.0.x не задеты (падение затрагивает только
+  добавленный в v1.1.0 `source_var`-трейс).
+- Portable-сборка без изменений — просто пересоберите
+  `build.bat portable`, если хочется свежий `.exe` под этот тег.
+
+
+---
+
+# Release 1.1.0
+
+Audio-analysis contract change + new local-only `audio` source.
+**Behavioural breaking change for users running the audio fallback:**
+demucs vocal isolation is now always on with `--use-audio-analysis`
+(no UI toggle to turn it off). The `--no-demucs` CLI flag has been
+removed. To opt out of the local fallback entirely, drop the
+`--use-audio-analysis` flag (CLI) or uncheck "Use audio analysis" (GUI).
+
+## What's new
+
+### Demucs is mandatory with the audio fallback
+The audio panel in the GUI no longer has the `Demucs` on/off combobox.
+Demucs vocal isolation is hardcoded on whenever the audio-analysis
+fallback is engaged. Rationale: a Whisper pass on the raw stereo mix
+of a dense song hallucinates wildly; the demucs pre-stage is the
+difference between usable lyrics and nonsense. The user can still
+opt out of the whole local fallback by unchecking the
+`Use audio analysis` master switch.
+
+- Removed: the `Demucs: off/auto/on` combobox widget from
+  `lyricsfag_gui.py` and its corresponding `self.demucs_var` /
+  `self.demucs_label` / `self.demucs_combo` attributes.
+- Removed: the `--no-demucs` CLI flag from `lyricsfag.py`. Trying
+  it now exits with `argparse` error
+  (`unrecognized arguments: --no-demucs`).
+- Removed: the `cfg.enable_demucs` knob from `JobConfig`; the
+  GUI's `_build_audio_analyzer()` now calls
+  `warn_first_run_aggregate(enable_demucs=True, ...)` unconditionally
+  and constructs the analyzer with the demucs pre-stage baked in.
+- The CPU warning in `lyricsfag.py` and `lyricsfag_gui.py` no longer
+  tells the user to "set Demucs to 'off'" — that escape hatch is gone.
+  The new escape hatches are: switch the Device dropdown to
+  `'auto'`/`'cuda'`, or uncheck `Use audio analysis` entirely.
+
+### New `audio` source option
+The Source dropdown in the GUI and the `--source` CLI flag now
+accept `audio` as a value. When picked, the lyrics chain is
+**just** the local Whisper + Demucs pipeline — LRCLIB and Genius
+are skipped entirely.
+
+- Useful for: fully-offline runs, batches where you know LRCLIB
+  won't have matches (obscure / instrumental-heavy libraries), or
+  when you explicitly don't want network calls during a run.
+- In the GUI, picking `Source = audio` auto-checks
+  `Use audio analysis` and greys out the checkbox so the chain
+  stays consistent (you can't accidentally leave the master
+  switch off while asking for the audio-only chain).
+- In the CLI, `--source audio` is a no-op unless
+  `--use-audio-analysis` is also passed (the audio analyzer is
+  only constructed when that flag is on; the GUI's auto-check
+  exists for the same reason).
+- The `lyrics.LyricsFetcher` dispatches this cleanly:
+  `source="auto"` still chains `LRCLIB → Genius → audio`; the new
+  `source="audio"` builds an order list with just the audio
+  provider and returns its result (or its `LyricsFailure`) directly.
+
+### Filename-based short-circuit for the audio branch
+The audio branch now refuses to run Whisper on tracks whose
+**filename** (case- and punctuation-insensitive) contains any of:
+- `instrumental`
+- `instrumental version`
+- `karaoke`
+- `off vocal`
+- `no vocal` / `no vocals`
+- `vocal removed` / `vocals removed`
+- `minus one`
+- `backing track`
+- `inst version`
+
+The check is anchored on word/punctuation boundaries (so
+`"tracklist"` doesn't trigger `backing track`, and `"instrument"`
+doesn't trigger `instrumental`). It is applied **only** to the
+audio branch — the LRCLIB and Genius branches are unaffected, on
+purpose: a karaoke file is often a faithful cover of a real song
+that LRCLIB knows, and the user almost certainly wants that match
+rather than no LRC at all. When the short-circuit fires, the file
+is reported as `missing` with the reason
+`filename matches karaoke/instrumental pattern; audio analysis
+skipped` and the run keeps going.
+
+The check lives in `lyricsfag_lib/lyrics.py` as
+`LyricsFetcher._INSTRUMENTAL_FILENAME_PATTERNS`,
+`_INSTRUMENTAL_FILENAME_RE`, and
+`LyricsFetcher._filename_blocks_audio(audio)`. The patterns
+tuple + the compiled regex are class-level so the regex is
+compiled once per process, not once per file.
+
+### Backward compatibility
+- v1.0.x `settings.json` files that contain the `demucs` key
+  (which the previous GUI wrote) are now silently ignored on load
+  instead of crashing the GUI on launch with
+  `AttributeError: 'LyricsFAGApp' object has no attribute
+  'demucs_var'`. The corresponding branch in
+  `_apply_persisted_settings` was removed.
+- v1.1.0 still recognises and honours every other v1.0.x setting
+  (folder, recursive, force, dry_run, use_audio_analysis, source,
+  genius_token, audio_model, audio_model_path, device). The
+  persisted `source=audio` value is honoured verbatim.
+
+### Versioning
+- `lyricsfag_lib.__version__` is now `"1.1.0"`.
+
+
+## Heads-up
+
+- **Behavioural breaking change:** demucs is now mandatory with the
+  audio fallback. Existing `--no-demucs` invocations (in scripts,
+  CI, READMEs) need to drop that flag. CPU-only users who were
+  relying on `--no-demucs` to make the audio fallback tractable
+  should now drop `--use-audio-analysis` entirely — Whisper on a
+  raw mix without demucs is generally not worth the wall-clock.
+- AI-assisted project — see the AI-assisted note at the top of the
+  README.
+- `lyricsfag.py` makes network requests to LRCLIB / Genius and
+  (opt-in) downloads Whisper / Demucs weights on the first run.
+  Always try it on a copy of your library before unleashing it
+  on the real one.
+- The portable build is unchanged; just re-run
+  `build.bat portable` if you want a fresh bundle that matches
+  this tag.
+
+---
+
+# Релиз 1.1.0
+
+Изменение контракта аудио-фолбэка + новый локальный источник `audio`.
+**Поведенческий breaking change для пользователей аудио-фолбэка:**
+Demucs теперь всегда включён вместе с `--use-audio-analysis`
+(переключателя в GUI больше нет). CLI-флаг `--no-demucs` удалён.
+Чтобы полностью отключить локальный фолбэк — уберите
+`--use-audio-analysis` (CLI) или снимите галку «Use audio analysis»
+(GUI).
+
+## What's new (RU)
+
+### Demucs обязателен с аудио-фолбэком
+В аудио-панели GUI больше нет выпадающего списка `Demucs` on/off.
+Вокальная изоляция Demucs хардкодом включена, когда задействован
+аудио-фолбэк. Обоснование: прогон Whisper по сырой стерео-смеси
+плотной песни дико галлюцинирует; Demucs — это разница между
+юзабельным текстом и ерундой. Пользователь всё ещё может
+выключить локальный фолбэк целиком, сняв главный переключатель
+`Use audio analysis`.
+
+- Удалены: виджет `Demucs: off/auto/on` из `lyricsfag_gui.py` и
+  соответствующие атрибуты `self.demucs_var` / `self.demucs_label`
+  / `self.demucs_combo`.
+- Удалён: CLI-флаг `--no-demucs` из `lyricsfag.py`. Попытка его
+  передать теперь завершается ошибкой `argparse`
+  (`unrecognized arguments: --no-demucs`).
+- Удалена: ручка `cfg.enable_demucs` из `JobConfig`; GUI'шный
+  `_build_audio_analyzer()` теперь вызывает
+  `warn_first_run_aggregate(enable_demucs=True, ...)` безусловно
+  и конструирует анализатор с принудительно включённой
+  Demucs-стадией.
+- CPU-предупреждения в `lyricsfag.py` и `lyricsfag_gui.py` больше
+  не советуют «поставить Demucs в 'off'» — этой лазейки больше нет.
+  Новые лазейки: переключить Device в `'auto'`/`'cuda'`, или
+  снять галку `Use audio analysis` целиком.
+
+### Новый источник `audio`
+Source-комбобокс в GUI и CLI-флаг `--source` теперь принимают
+`audio` как значение. При его выборе цепочка текстов состоит
+**только** из локального пайплайна Whisper + Demucs — LRCLIB и
+Genius полностью пропускаются.
+
+- Полезно для: полностью офлайновых прогонов, батчей, для которых
+  заведомо нет совпадений в LRCLIB (малоизвестные /
+  инструментально-тяжёлые библиотеки), или когда сетевые вызовы
+  во время прогона нежелательны.
+- В GUI при выборе `Source = audio` чекбокс `Use audio analysis`
+  автоматически включается и блокируется, чтобы цепочка оставалась
+  согласованной (нельзя случайно оставить главный переключатель
+  выключенным, запрашивая аудио-only цепочку).
+- В CLI `--source audio` — no-op без `--use-audio-analysis`
+  (аудио-анализатор конструируется только при этом флаге; авто-чек
+  в GUI существует ровно по той же причине).
+- `lyrics.LyricsFetcher` обрабатывает это чисто: `source="auto"`
+  по-прежнему собирает цепочку `LRCLIB → Genius → audio`;
+  новый `source="audio"` строит список порядка с единственным
+  аудио-провайдером и сразу возвращает его результат (или
+  `LyricsFailure` от него).
+
+### Шорткат по имени файла для аудио-ветки
+Аудио-ветка теперь отказывается гнать Whisper по трекам, в **имени
+файла** (без учёта регистра и пунктуации) встречается любое из:
+- `instrumental`
+- `instrumental version`
+- `karaoke`
+- `off vocal`
+- `no vocal` / `no vocals`
+- `vocal removed` / `vocals removed`
+- `minus one`
+- `backing track`
+- `inst version`
+
+Проверка якорится на границах слов/пунктуации (поэтому
+`"tracklist"` не триггерит `backing track`, а `"instrument"` не
+триггерит `instrumental`). Применяется **только** к аудио-ветке —
+LRCLIB и Genius намеренно не задеты: караоке-файл часто является
+точным кавером реальной песни, о которой LRCLIB знает, и
+пользователь почти наверняка хочет это совпадение, а не
+отсутствующий LRC. Когда шорткат срабатывает, файл репортится
+как `missing` с причиной
+`filename matches karaoke/instrumental pattern; audio analysis
+skipped`, прогон продолжается.
+
+Проверка живёт в `lyricsfag_lib/lyrics.py` как
+`LyricsFetcher._INSTRUMENTAL_FILENAME_PATTERNS`,
+`_INSTRUMENTAL_FILENAME_RE` и
+`LyricsFetcher._filename_blocks_audio(audio)`. Кортеж паттернов +
+скомпилированный regex — class-level, поэтому regex компилируется
+один раз на процесс, а не на файл.
+
+### Обратная совместимость
+- `settings.json` от v1.0.x с ключом `demucs` (который писал
+  прошлый GUI) теперь молча игнорируется при загрузке вместо
+  падения GUI на старте с
+  `AttributeError: 'LyricsFAGApp' object has no attribute
+  'demucs_var'`. Соответствующая ветка в
+  `_apply_persisted_settings` удалена.
+- v1.1.0 по-прежнему распознаёт и уважает все прочие настройки
+  из v1.0.x (folder, recursive, force, dry_run, use_audio_analysis,
+  source, genius_token, audio_model, audio_model_path, device).
+  Сохранённое значение `source=audio` учитывается буквально.
+
+### Версионирование
+- `lyricsfag_lib.__version__` теперь `"1.1.0"`.
+
+
+## Heads-up
+
+- **Поведенческий breaking change:** Demucs теперь обязателен с
+  аудио-фолбэком. Существующие вызовы `--no-demucs` (в скриптах,
+  CI, README'ах) должны убрать этот флаг. Пользователям только-на-CPU,
+  которые полагались на `--no-demucs`, чтобы сделать аудио-фолбэк
+  посильно-быстрым, теперь лучше убрать `--use-audio-analysis`
+  целиком — Whisper по сырой смеси без Demucs в целом не стоит
+  потраченного времени.
+- Проект с существенной помощью AI — см. AI-дисклеймер в шапке README.
+- `lyricsfag.py` ходит в сеть за LRCLIB / Genius и (опционально)
+  качает Whisper / Demucs при первом запуске. Сначала на копии библиотеки.
+- Portable-сборка без изменений — просто пересоберите
+  `build.bat portable`, если хочется свежий `.exe` под этот тег.
+
+
+---
+
+# Release 1.0.2
+
+Pre-release polish — no API changes. GUI gets a Help button, hover
+tooltips, a completion popup, and the resolved `models/` paths get
+surfaced at startup. Dead code is cleaned up and the long-stale
+`lyricsfag_lib.__version__` (`0.1.0`) is finally aligned with the tagged
+release.
+
+## What's new
+
+### GUI
+- New **`?  Help`** button (last in the toolbar row, right of Open output
+  folder) opens `messagebox.showinfo("LyricsFAG — Quick start", …)`
+  describing:
+  - The provider chain (LRCLIB → Genius → local audio, in that order).
+  - The `GENIUS_ACCESS_TOKEN` env var (or `--genius-token`) requirement
+    for the Genius fallback.
+  - The first-run download sizes (Whisper base ~150 MB, Demucs htdemucs_ft
+    ~84 MB) so the popup is the place users land when they want to know
+    why their first run pulled the network.
+  - A `--dry-run` safety tip ("try it on a copy of your library first").
+- **Tooltips on every primary input widget.** New `Tooltip` class
+  (Toplevel-based, binds `<Enter>` / `<Leave>` / `<ButtonPress>`, 500 ms
+  hover delay, 8 s auto-dismiss). Hover targets: the folder entry, recursive/force/
+  dry-run checkboxes, source dropdown, Genius token, Whisper model +
+  Device, Demucs model + model path, the Use audio-analysis checkbox,
+  and all four row buttons (`Start`, `Stop`, `Open output folder`,
+  `Help`).
+- **Completion popup.** The worker still emits the same queue events
+  (`job_done` / `job_stopped` / `job_empty`); `_set_summary` now pops
+  - `messagebox.showinfo("Done", summary)` on a clean run.
+  - `messagebox.showinfo("Stopped", partial summary)` when the user
+    pressed Stop.
+  - `messagebox.showerror("Worker crashed", traceback)` on exceptions,
+    routed via the existing `job_errored` channel.
+  - Empty folders (or fully-skipped runs) skip the popup so accidental
+    one-click runs don't wake the user with a useless modal. The
+    `_on_close` race with a late summary is guarded by `winfo_exists()`
+    so we never call `showinfo` on a torn-down `Tk`.
+
+### Startup visibility
+- `audio_analysis.describe_models_layout(audio_model: str)` returns
+  `(whisper_repo: str | None, demucs_repo: str)`. Both `lyricsfag.py`
+  (CLI) and `lyricsfag_gui.py` (GUI) call it immediately after the
+  analyzer is constructed and emit a multi-line `LOG.info` showing the
+  resolved paths so the user can verify where weights actually land:
+  - Whisper enabled → `models/whisper-base/` adjacent to the script.
+  - Whisper disabled → reports "audio analysis off, no whisper repo".
+  - Demucs always reports `models/demucs/` (the LocalRepo layout
+    `./models/demucs/<name>.th`, matching demucs's own `files.txt`).
+  The path contract is unchanged; this just makes it visible.
+
+### Cleanup
+- `lyricsfag_lib.__init__.py` now exposes `__version__ = "1.0.2"` —
+  resolves the `0.1.0` drift going all the way back to the initial
+  scaffolding. Anything that reads the lib version gets a real answer.
+- Removed unused GUI constant `LyricsFAGApp.COLOUR_BG = "#1e1e1e"`
+  (defined but never referenced after the dark-mode experiment got
+  abandoned earlier in the project).
+- Dropped the unused `_format_provider_breakdown` import from
+  `lyricsfag_gui.py`.
+- Renamed the audio-row "Device:" label to `audio_device_label` to
+  stop it from shadowing the status-row badge variable named
+  `device_label`. Two same-named attrs on the same `LyricsFAGApp`
+  instance was a latent bug that would have bitten any future code
+  reading the badge widget by handle.
+
+## Commits in this release
+
+- `e922d1c` — pre-release: GUI polish + dead-code cleanup + models/ path verification
+
+(plus the version-bump commit that lands this file.)
+
+## Heads-up
+
+- AI-assisted project — see the AI-assisted note at the top of the README.
+- `lyricsfag.py` makes network requests to LRCLIB / Genius and (opt-in)
+  downloads Whisper / Demucs weights on the first run. Always try it on
+  a copy of your library before unleashing it on the real one.
+- The portable build is unchanged; just re-run `build.bat portable` if
+  you want a fresh bundle that matches this tag.
+
+---
+
+# Релиз 1.0.2
+
+Полировка перед релизом. API не меняется. GUI получает кнопку Help,
+тултипы на 16 элементах, попап завершения и видимый сразу лог путей
+до `models/`. Удалён мёртвый код, и `lyricsfag_lib.__version__`
+наконец-то синхронизирован с тегом (раньше возвращал `0.1.0`
+со времён скелета).
+
+## What's new (RU)
+
+### GUI
+- Новая кнопка **`?  Help`** (последняя в ряду, правее Open output
+  folder) → `messagebox.showinfo(...)`,
+  внутри: цепочка провайдеров (LRCLIB → Genius → локальное аудио),
+  напоминание про `GENIUS_ACCESS_TOKEN` / `--genius-token`, размеры
+  весов при первом запуске (Whisper base ~150 MB, Demucs htdemucs_ft ~84 MB)
+  и подсказка «сначала прогон на копии через `--dry-run`».
+- **Тултипы на всех основных интерактивных элементах.** Новый класс
+  `Tooltip` (Toplevel, bind на `<Enter>` / `<Leave>` / `<ButtonPress>`,
+  задержка hover 500 мс, автоскрытие 8 с). Навешиваются на: поле выбора папки, чекбоксы
+  recursive / force / dry-run, source-комбобокс, поле Genius-токена,
+  Whisper model + Device, Demucs model + model path, чекбокс
+  «Use audio analysis», и все 4 кнопки ряда (Start, Stop, Open output folder, Help).
+- **Попап завершения.** Воркер по-прежнему пушит `job_done` / `job_stopped`
+  / `job_empty` в очередь; `_set_summary` теперь открывает:
+  - `messagebox.showinfo("Done", summary)` при штатном окончании.
+  - `messagebox.showinfo("Stopped", частичный summary)` если жмякнули Stop.
+  - `messagebox.showerror("Worker crashed", traceback)` на крашах
+    воркера (через существующий канал `job_errored`).
+  Пустые папки (или полностью пропущенные папки) больше не открывают
+  модальный попап — иначе один случайный клик пробуждал пользователя
+  бесполезным алертом. Гонка с `_on_close` (если попап прилетает после
+  destroy) страхуется `winfo_exists()` — на снесённом Tk уже не дёргаемся.
+
+### Видимость путей при старте
+- `audio_analysis.describe_models_layout(audio_model)` возвращает
+  `(whisper_repo: str | None, demucs_repo: str)`. И `lyricsfag.py`,
+  и `lyricsfag_gui.py` зовут её сразу после построения анализатора
+  и печатают многострочный `LOG.info`, чтобы пользователь без grep'а
+  по исходникам видел, куда реально лягут веса:
+  - Whisper включён → `models/whisper-base/` рядом со скриптом.
+  - Whisper выключен → пишет «audio analysis off, no whisper repo».
+  - Demucs всегда → `models/demucs/` (LocalRepo-лейаут
+    `./models/demucs/<name>.th`, как и у самого demucs'а в `files.txt`).
+  Контракт путей прежний — просто теперь видимый.
+
+### Cleanup
+- `lyricsfag_lib/__init__.py` теперь честно возвращает `__version__ ==
+  "1.0.2"` (раньше залипало на `0.1.0` со времён самой первой
+  разметки проекта). Любой код, который читает версию либы, получит
+  реальный ответ.
+- Удалена неиспользуемая константа `LyricsFAGApp.COLOUR_BG = "#1e1e1e"`
+  (определялась, но ни разу не читалась после того, как эксперимент
+  с dark mode сам собой отвалился по дороге).
+- Удалён неиспользуемый импорт `_format_provider_breakdown` из GUI.
+- Аудио-лейбл «Device:» переименован в `audio_device_label`, чтобы
+  не перекрывать бейдж статуса (тоже назывался `device_label`). Два
+  одинаковых атрибута на одном `LyricsFAGApp` были латентным багом
+  — любой будущий код, который читает бейдж по handle, получил бы
+  вместо него аудио-лейбл.
+
+## Коммиты в этом релизе
+
+- `e922d1c` — pre-release: GUI polish + dead-code cleanup + models/ path verification
+
+(плюс коммит с бампом версии, который и тащит этот файл.)
+
+## Heads-up
+
+- Проект с существенной помощью AI — см. AI-дисклеймер в шапке README.
+- `lyricsfag.py` ходит в сеть за LRCLIB / Genius и (опционально) качает
+  Whisper / Demucs при первом запуске. Сначала на копии библиотеки.
+- Portable-сборка без изменений — просто пересоберите `build.bat portable`,
+  если хочется свежий `.exe` под этот тег.
+
+
+---
+
+# Release 1.0.1
+
+First tagged release. Polish and LRC formatting changes since the
+v1.0.0 initial commit (`2ced534`).
+
+## What's new
+
+### README
+- **Badges в шапке:** GitHub / Python / License; новый `RU`-бейдж для двуязычной навигации.
+- **Copy-edit:** Переписаны неловкие/опечаточные фразы (`cant` → `can't`, `significally` → `notably slower`); сглажено вступление про Demucs + Whisper; добавлены reference-определения `[Demucs]` / `[Whisper]`.
+- **AI-assistance disclaimer:** Callout прямо в шапке, перед описанием, с указанием модели ([Codebuff](https://codebuff.com) / `minimax/minimax-m3`).
+- **Helper-script callout в Quick start:** Оба скрипта (`scripts/download_whisper_model.py` и `scripts/download_demucs_model.py`) теперь упомянуты в шагах быстрого старта со ссылками на разделы.
+- **License & credits:** Расширен полным списком upstream-сервисов и библиотек с гиперссылками; явно указана MIT и блок про AI-assistance, согласованный с шапочным дисклеймером.
+- **`README.ru.md`:** Полный русский перевод с двусторонней ссылкой на английскую версию.
+
+### Lyrics / LRC format
+- Удалена verbose-строка `[# generated by whisper; compute_type=…; duration=…; language=…; model=…; segments_kept=…; vocal_isolation=…]` из сгенерированных `.lrc`-файлов (LRCLIB / Genius / heuristic / vad-preflight не затронуты).
+- Вместо неё остаётся ровно одна человеко-читаемая строка:
+  - `[# Generated Lyrics with Whisper]` — стандартный Whisper-проход (или fallback на raw-микс).
+  - `[# Generated Lyrics with Demucs + Whisper]` — если Demucs предварительно изолировал вокал.
+- `LyricsResult.raw_extras` остаётся заполненным — логгер и GUI продолжают видеть полные данные pipeline'а; в файл пользователю выходит одна строка.
+
+## Commits since v1.0.0
+
+- `659cdda` — README: add Russian translation (README.ru.md)
+- `583591c` — README: copy-edit (typos, smoother Demucs/Whisper intro, expanded License & credits)
+- `59e5cef` — README: add AI-assistance disclaimer + model disclosure in header
+- `59c0987` — lyrics: drop verbose Whisper diagnostic; switch marker to "Demucs + Whisper" when applicable
+- `cac71c8` — README: add GH badge + Whisper/Demucs helper-script callout in Quick start
+
+## Heads-up
+
+- Проект создан при существенной помощи AI-кодинг-ассистента; см. AI-assisted note в шапке README. Использование — на свой страх и риск.
+- Запуск `lyricsfag.py` подразумевает сетевые запросы к LRCLIB / Genius и (опционально) скачивание весов Whisper (~150 MB) / Demucs (~420 MB). Перед запуском на реальной фонотеке опробуйте инструмент на копии.
