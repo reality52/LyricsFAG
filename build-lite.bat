@@ -1,15 +1,30 @@
 @echo off
-REM Build the "lite" LyricsFAG variants: a small CLI/GUI .exe pair that
-REM uses LRCLIB + Genius only.  Does NOT bundle faster-whisper / demucs
-REM / torch / scipy, so the local audio-analysis chain
-REM (``--use-audio-analysis`` / the GUI "Use audio analysis" checkbox)
-REM is unavailable on this build -- a user who enables it gets a clean
-REM ``LyricsFailure`` telling them to grab the portable build instead.
+REM Build the "lite" LyricsFAG variant: a SINGLE small .exe that handles
+REM both the CLI (``lyricsfag.exe "C:\Music\Library"``) and the GUI
+REM (``lyricsfag.exe`` double-click / explicit ``--gui`` flag) via the
+REM auto-dispatch in :func:`lyricsfag._wants_gui`.  Does NOT bundle
+REM faster-whisper / demucs / torch / scipy, so the local audio-analysis
+REM chain (``--use-audio-analysis`` / the GUI "Use audio analysis"
+REM checkbox) is unavailable on this build -- a user who enables it
+REM gets a clean ``LyricsFailure`` telling them to grab the portable
+REM build instead.
 REM
-REM Output (alongside any portable variants the user might have built
-REM with build-portable.bat):
-REM   dist\LyricsFAG-Lite.exe         -- CLI  (~50 MB)
-REM   dist\LyricsFAG-GUI-Lite.exe     -- GUI  (~50 MB)
+REM Output (alongside any portable variant the user might have built
+REM elsewhere with build-portable.bat):
+REM   dist\LyricsFAG-Lite.exe    -- single dual-mode binary (~50 MB)
+REM
+REM How "GUI when double-clicked, CLI when run from terminal" works
+REM -----------------------------------------------------------------
+REM Entry point is ``lyricsfag.py`` (NOT ``lyricsfag_gui.py``).  When
+REM pyinstaller builds with ``--console``, the result is a
+REM ``LyricsFAG-Lite.exe`` that:
+REM   * When launched from PowerShell/cmd WITH args (positional path
+REM     or any flag) -> runs the CLI loop, prints colours + log lines.
+REM   * When launched with NO args (typical Windows double-click)
+REM     -> :func:`lyricsfag._wants_gui` returns ``True`` (empty argv
+REM     rule) -> launches the Tk window.  The console process stays
+REM     alive so the Tk window overlays it; closing the window exits
+REM     cleanly.  This is the same pattern Git for Windows uses.
 REM
 REM Why this build is so much smaller than portable
 REM ------------------------------------------------
@@ -24,14 +39,13 @@ REM size table.
 REM
 REM Cleanup
 REM -------
-REM We DO clean our own previous .spec + .exe at the top so a
-REM standalone re-run of this script (or the orchestrator's
-REM ``all`` path, which wipes everything anyway) gets a fresh
-REM PyInstaller pass without stale configs.  We do NOT clean the
-REM whole ``dist\`` -- the orchestrator only does that when
-REM ``all`` is requested, and a single-target build is meant to
-REM leave the other variant's outputs alone.  This was the
-REM v1.1.3 reviewer-flagged behaviour.
+REM We clean our own previous .spec + .exe at the top so a standalone
+REM re-run of this script gets a fresh PyInstaller pass without stale
+REM configs.  We do NOT clean the whole ``dist\`` -- the orchestrator
+REM ``build.bat`` wipes ``dist\`` only when ``all`` is requested, and
+REM a single-target build is meant to leave the other variant's
+REM outputs alone so the user can build lite at one time and portable
+REM at another without losing work.
 
 setlocal
 
@@ -39,23 +53,21 @@ set "ROOT=%~dp0"
 pushd "%ROOT%"
 
 echo === Cleaning our own previous outputs ===
-REM Defensive cleanup so a re-run of ``build-lite.bat`` standalone
-REM doesn't leave stale .spec / .exe around (the orchestrator
-REM ``build.bat`` only wipes the whole tree when ``all`` is
-REM requested; for single-target runs we leave the other
-REM variant's outputs alone so the user can build lite at one
-REM time and portable at another without losing work).
 if exist dist\LyricsFAG-Lite.exe      del /q dist\LyricsFAG-Lite.exe
-if exist dist\LyricsFAG-GUI-Lite.exe  del /q dist\LyricsFAG-GUI-Lite.exe
 if exist LyricsFAG-Lite.spec          del /q LyricsFAG-Lite.spec
-if exist LyricsFAG-GUI-Lite.spec      del /q LyricsFAG-GUI-Lite.spec
 
 echo === Installing build + runtime dependencies (lite) ===
 pip install --upgrade pip
 pip install -r requirements.txt
 pip install pyinstaller==6.*
 
-echo === Building CLI binary (LyricsFAG-Lite.exe) ===
+echo === Building dual-mode binary (LyricsFAG-Lite.exe) ===
+REM --console keeps stdout/stderr visible for terminal users; the Tk
+REM window still pops up on no-args double-click and overlays the
+REM console (Windows-native pattern).
+REM --onefile produces a single self-extracting .exe.
+REM Entry point is lyricsfag.py because its main() auto-dispatches
+REM GUI vs CLI based on argv presence (see _wants_gui docstring).
 pyinstaller ^
   --noconfirm ^
   --onefile ^
@@ -66,20 +78,10 @@ pyinstaller ^
 if errorlevel 1 goto :fail
 
 echo.
-echo === Building GUI binary (LyricsFAG-GUI-Lite.exe, windowed) ===
-pyinstaller ^
-  --noconfirm ^
-  --onefile ^
-  --windowed ^
-  --name LyricsFAG-GUI-Lite ^
-  --paths . ^
-  lyricsfag_gui.py
-if errorlevel 1 goto :fail
-
-echo.
 echo === Lite build complete ===
-echo   dist\LyricsFAG-Lite.exe       (CLI,  LRCLIB+Genius only)
-echo   dist\LyricsFAG-GUI-Lite.exe   (GUI,  LRCLIB+Genius only)
+echo   dist\LyricsFAG-Lite.exe    (LRCLIB+Genius only; ~50 MB; dual-mode)
+echo     Double-click in Explorer -> GUI window.
+echo     From PowerShell:         dist\LyricsFAG-Lite.exe "C:\Music\Library"
 popd
 endlocal
 exit /b 0

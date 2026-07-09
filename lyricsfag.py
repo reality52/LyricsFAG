@@ -17,7 +17,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-import sys
+import sys, re
 import time
 from collections import Counter
 from dataclasses import dataclass
@@ -41,7 +41,8 @@ from lyricsfag_lib.lyrics import (  # noqa: E402
     LyricsFetcher,
     LyricsResult,
 )
-from lyricsfag_lib.lrc import write_lrc  # noqa: E402
+from lyricsfag_lib.lrc import extract_plain_lyrics, write_lrc  # noqa: E402
+from lyricsfag_lib.tags import EmbedResult, embed_lyrics  # noqa: E402
 from lyricsfag_lib import __version__ as _LIBRARY_VERSION  # noqa: E402
 
 LOG = logging.getLogger("lyricsfag")
@@ -217,6 +218,20 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument(
+        "--embed-in-tags",
+        dest="embed_in_tags",
+        action="store_true",
+        help=(
+            "Also write a plain-text lyrics tag into each audio file "
+            "(ID3 USLT, Vorbis LYRICS, MP4 \\xa9lyr, WMA WM/Lyrics, "
+            "APEv2 LYRICS as appropriate). Opt-in: the .lrc sidecar "
+            "keeps the synced / header-rich view; the tag holds just "
+            "the lyric text. WAV, TAK and raw AAC (ADTS) have no "
+            "standard lyrics tag and are skipped with a log warning "
+            "-- the batch never fails on those formats."
+        ),
+    )
+    p.add_argument(
         "--dry-run",
         action="store_true",
         help="Print what would be done, write nothing.",
@@ -301,6 +316,20 @@ class ProcessOutcome:
     reason: Optional[str] = None  # provider error reason, set on STATUS_FAILED
     line_count: int = 0
     synced: bool = False
+    # --- ``--embed-in-tags`` outcome ------------------------------------
+    # Populated only when ``embed_in_tags=True`` was passed to
+    # :func:`process_one`; an empty ``tags_status`` is the default and
+    # is what every pre-feature / dry-run / unimplemented caller sees.
+    # ``tags_error`` is set ONLY when ``tags_status == "error"``.  The
+    # sidecar ``status`` (above) is independent of the tag-embed
+    # outcome -- a tag failure does NOT downgrade ``STATUS_WRITTEN``
+    # because the .lrc is already on disk and the user gets a clean
+    # warning (``[tags=ERROR: ...]`` suffix in the log line), not a
+    # red fail.
+    tags_status: str = ""              # "embedded" | "skipped" | "unsupported" | "error"
+    tags_format: str = ""              # mutagen class name: "MP3" / "FLAC" / "MP4" / ...
+    tags_target: str = ""              # concrete tag key: "USLT" / "LYRICS" / "©lyr" / "WM/Lyrics"
+    tags_error: Optional[str] = None
 
 
 def _shown_path(audio: AudioFile, root: Path) -> str:
@@ -318,6 +347,7 @@ def process_one(
     root: Path,
     force: bool,
     dry_run: bool,
+    embed_in_tags: bool = False,
 ) -> ProcessOutcome:
     """Process a single audio file and return a :class:`ProcessOutcome`."""
     shown = _shown_path(audio, root)
@@ -411,7 +441,22 @@ def process_one(
             reason=str(exc),
         )
 
-    return ProcessOutcome(
+    # --- optional in-tag embedding --------------------------------------
+    # Opt-in via ``--embed-in-tags`` (CLI flag) / GUI checkbox.  Runs
+    # AFTER the .lrc is written so a save failure here doesn't roll
+    # back the .lrc write -- the sidecar is already on disk and the
+    # user gets a warning, not a batch crash.  Dry-run skips it
+    # entirely (consistent with the rest of dry-run semantics -- a
+    # dry run reads but never writes).  ``--no-force`` semantics are
+    # mirrored: an existing tag of any flavour is left untouched and
+    # the outcome carries ``tags_status="skipped"`` so the per-file
+    # log line ends with ``[tags=skipped (existing)]``.  When
+    # :func:`extract_plain_lyrics` returns empty (instrumental
+    # result, only diagnostic lines, etc.) we leave ``tags_status``
+    # blank so the per-file log line is uncluttered -- embedding a
+    # zero-byte lyrics tag is the ISBN of every half-finished
+    # tagging pass and we don't want to write one.
+    outcome = ProcessOutcome(
         status=STATUS_WRITTEN,
         audio_path=audio.path,
         shown=shown,
@@ -420,6 +465,93 @@ def process_one(
         line_count=len(doc.lines),
         synced=result.is_synced,
     )
+    if embed_in_tags and not dry_run:
+        plain = extract_plain_lyrics(doc)
+        if plain:
+            embedded = embed_lyrics(audio.path, plain, force=force)
+            if embedded.status == "error":
+                LOG.warning(
+                    "%s :: tag embed failed (%s): %s",
+                    shown,
+                    embedded.format or "?",
+                    embedded.error,
+                )
+            outcome.tags_status = embedded.status
+            outcome.tags_format = embedded.format
+            outcome.tags_target = embedded.tag_name
+            if embedded.status == "error":
+                outcome.tags_error = embedded.error or None
+        else:
+            LOG.debug(
+                "%s :: no plain lyrics extracted; tag embed skipped",
+                shown,
+            )
+    return outcome
+
+
+def _format_tags_suffix(outcome: ProcessOutcome) -> str:
+    """Render the ``--embed-in-tags`` outcome as a single brief suffix.
+
+    Returns ``""`` when the feature was off (no suffix in the log line).
+    Otherwise one of:
+
+    * ``[tags=USLT]`` / ``[tags=APE/LYRICS]`` / ``[tags=OGG-Vorbis/LYRICS]``
+      for a successful write into ``tags_target`` (``tags_format``
+      carries the raw mutagen class name and tags_target the specific
+      key).  We display a friendly format label via
+      :data:`_FORMAT_LABELS` so users aren't seeing mutagen's internal
+      class names (``MonkeysAudio``, ``OggVorbis``, ...) in the log.
+    * ``[tags=skipped (existing)]`` -- ``--no-force`` honoured a
+      pre-existing tag.
+    * ``[tags=skipped (no standard tag)]`` -- the format has no
+      standard lyrics frame (WAV / TAK / raw AAC).
+    * ``[tags=ERROR: ...]`` -- mutagen.save raised; details in the
+      WARNING line emitted earlier.
+
+    Bracketed so the user can grep ``[tags=`` from the log panel for
+    an exhaustive list of files whose tag step reported something.
+    """
+    if not outcome.tags_status:
+        return ""
+    fmt = _FORMAT_LABELS.get(outcome.tags_format, outcome.tags_format)
+    label = outcome.tags_target or fmt or "tags"
+    # For non-Vorbis/APE-LYRICS tag-name-keys whose name is unique by
+    # itself (USLT / ©lyr / WM/Lyrics) we omit the format prefix to
+    # keep the line short.  For LYRICS we DO include the format
+    # because the FLAC / OGG-Vorbis / Opus / WavPack / APE family
+    # all use the same key and the user may want to know which one
+    # fired.
+    if outcome.tags_target == "LYRICS" and fmt:
+        label = f"{fmt}/LYRICS"
+    if outcome.tags_status == "embedded":
+        return f"[tags={label}]"
+    if outcome.tags_status == "skipped":
+        return "[tags=skipped (existing)]"
+    if outcome.tags_status == "unsupported":
+        return "[tags=skipped (no standard tag)]"
+    if outcome.tags_status == "error":
+        return f"[tags=ERROR: {(outcome.tags_error or 'unknown')}]"
+    return f"[tags={outcome.tags_status}]"
+
+
+# User-facing format label map.  Maps the raw mutagen class names
+# (which we'd otherwise leak to the log as ``[tags=MonkeysAudio/LYRICS]``
+# or ``[tags=OggVorbis/LYRICS]``) to friendlier strings.  Used by
+# :func:`_format_tags_suffix` only -- the internal
+# :attr:`ProcessOutcome.tags_format` stays raw so test assertions
+# against ``EmbedResult.format`` remain stable across releases.
+_FORMAT_LABELS: dict[str, str] = {
+    "MonkeysAudio": "APE",
+    "OggVorbis": "OGG-Vorbis",
+    "OggOpus": "Opus",
+    "WavPack": "WavPack",
+    "MP3": "MP3",
+    "FLAC": "FLAC",
+    "MP4": "MP4",
+    "ASF": "WMA",
+    "WAVE": "WAV",
+    "TAK": "TAK",
+}
 
 
 def _log_outcome(outcome: ProcessOutcome) -> None:
@@ -432,25 +564,42 @@ def _log_outcome(outcome: ProcessOutcome) -> None:
     # branch; we deliberately do not touch them.
     provider_name = outcome.provider or "?"
     is_whisper = provider_name == "whisper"
+    tags_suffix = _format_tags_suffix(outcome)
 
     if outcome.status == STATUS_WRITTEN:
         # Filename green on success; provider cyan by default, ORANGE
-        # when whisper transcription produced the lyrics.
+        # when whisper transcription produced the lyrics. The tag-embed
+        # suffix (if any) is appended in a single trailing space + tags
+        # block so a ``[tags=...]`` segment is greppable from the log
+        # panel for an exhaustive list of files whose tag step
+        # reported something.
         provider_styler = Colors.orange if is_whisper else Colors.cyan
         kind = "synced" if outcome.synced else "plain"
-        LOG.info(
-            "%s :: wrote %s [%s, %s, %d lines]",
-            outcome.shown,
-            Colors.green(outcome.target_path.name if outcome.target_path else "?"),
-            provider_styler(provider_name),
-            kind,
-            outcome.line_count,
-        )
+        if tags_suffix:
+            LOG.info(
+                "%s :: wrote %s [%s, %s, %d lines] %s",
+                outcome.shown,
+                Colors.green(outcome.target_path.name if outcome.target_path else "?"),
+                provider_styler(provider_name),
+                kind,
+                outcome.line_count,
+                tags_suffix,
+            )
+        else:
+            LOG.info(
+                "%s :: wrote %s [%s, %s, %d lines]",
+                outcome.shown,
+                Colors.green(outcome.target_path.name if outcome.target_path else "?"),
+                provider_styler(provider_name),
+                kind,
+                outcome.line_count,
+            )
     elif outcome.status == STATUS_DRY_RUN:
         # Filename stays plain (no green) in dry-run -- the existing
         # convention is green on the *provider* in this branch.  Whisper
         # still swaps to orange so the synthetic-source flag is visible
-        # in both branches.
+        # in both branches.  Tag-emit step is dry-run-skipped so no
+        # suffix in this branch.
         provider_styler = Colors.orange if is_whisper else Colors.green
         LOG.info(
             "%s :: would write %s [%s] %d lines (synced=%s)",
@@ -487,6 +636,7 @@ def process(
     force: bool,
     dry_run: bool,
     limit: int,
+    embed_in_tags: bool = False,
 ) -> tuple[int, int, int, int, int, Counter[str]]:
     """Walk ``audio_iter`` and write LRC files.
 
@@ -507,7 +657,8 @@ def process(
             break
 
         outcome = process_one(
-            audio, fetcher, root=root, force=force, dry_run=dry_run
+            audio, fetcher, root=root, force=force, dry_run=dry_run,
+            embed_in_tags=embed_in_tags,
         )
         _log_outcome(outcome)
 
@@ -670,11 +821,37 @@ def _build_audio_analyzer(args: argparse.Namespace):
 # ---------------------------------------------------------------------------
 
 
+# Module-level so :func:`_wants_gui` doesn't recompile on every CLI
+# invocation.  Match either the long form (``--gui`` / ``--gui=1``
+# / ``-gui`` / ``-gui=1``) or the short form (``-g`` / ``-g1``).
+# Anchored to the start of the token so flags like ``--guide``,
+# ``--gutter`` or ``--gui-split`` don't false-match (each one's
+# char after ``gui`` is a word character, not ``=`` / start-of-arg /
+# literal end-of-string, so the regex correctly rejects them).
+_GUI_FLAG_RE = re.compile(r"^(?:--?gui|-g)(?:=|$)")
+
+
 def _wants_gui(argv: Optional[list[str]]) -> bool:
-    """Cheap pre-check for ``--gui`` / ``-g`` without invoking argparse."""
-    import re
-    needle = re.compile(r"^--?gui(=|$)")
-    return any(needle.search(a) for a in (argv or sys.argv[1:]))
+    """Decide whether the binary should open its Tk window.
+
+    Single ``.exe`` servers both the pure-CLI invocation
+    (``lyricsfag.exe "C:\\Music"``) and the desktop GUI launch
+    (``lyricsfag.exe --gui`` / pure double-click).  The test is:
+
+    * empty argv → GUI (Windows users double-click the ``.exe``; the
+      CLI's argparse would have nothing to do anyway and the Tk
+      window is what they expect),
+    * ``--gui`` / ``-g`` flag anywhere → GUI (explicit),
+    * anything else (positional path, any other flag) → CLI.
+
+    Built as a cheap pre-check so the GUI's tkinter import stays
+    deferred; we don't want ``python -c "import lyricsfag"`` to drag
+    Tk into a server-side python startup.
+    """
+    args_list = argv if argv is not None else sys.argv[1:]
+    if not args_list:
+        return True
+    return any(_GUI_FLAG_RE.match(a) for a in args_list)
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -745,6 +922,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         force=args.force,
         dry_run=args.dry_run,
         limit=args.limit,
+        embed_in_tags=args.embed_in_tags,
     )
     elapsed = time.monotonic() - started
 

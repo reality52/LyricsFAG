@@ -146,6 +146,50 @@ def _serialize(doc: LRCDocument) -> str:
     return "\n".join(parts)
 
 
+def extract_plain_lyrics(doc: "LRCDocument") -> str:
+    """Render an :class:`LRCDocument` as plain text suitable for tag embedding.
+
+    Strips:
+
+    * **timestamps** -- ``[mm:ss.cc]`` prefixes are dropped; we only
+      return the lyric text column.
+    * **blank line runs** -- consecutive empties collapse, and any
+      trailing blanк is trimmed, so an embedded tag doesn't pad-spam
+      the user's music player.
+
+    Does **NOT** include:
+
+    * ``[ti:..]`` / ``[ar:..]`` / ``[au:..]`` / ``[lang:..]`` /
+      ``[year:..]`` / ``[tool:..]`` headers -- audio tags hold a
+      single text slot, and mixing headers into the lyrics body shows
+      up as raw ``[ti:..]`` text in players that don't pre-filter
+      them.
+    * ``[# ...]`` producer diagnostics (``WHISPER_PROVIDER_MARKER`` etc.)
+      -- those are bookkeeping for the sidecar ``.lrc``; the audio tag
+      is for line-level lyric text only.
+
+    Stops at the first empty ``timestamp`` after a non-empty run: in
+    :class:`LRCDocument` an empty timestamp marks a "blank-line
+    separator" used to break synced and unsynced sections, and we
+    don't want a single embedded blank line followed by the actual
+    lyrics (players would render the gap as a real blank).
+
+    Used by :func:`lyricsfag_lib.tags.embed_lyrics` (via
+    :func:`lyricsfag.process_one`) when the user opts in via
+    ``--embed-in-tags`` or the GUI's 'Embed lyrics in tags' checkbox.
+    """
+    out: list[str] = []
+    for _ts, text in doc.lines:
+        stripped = text.strip()
+        if not stripped:
+            continue
+        out.append(stripped)
+    # ``"\n".join`` is fine for any tag format Vorbis / ID3 / MP4 /
+    # ASF / APEv2 all accept Unix line splits identically (the
+    # taggers' respective save()s normalise if needed).
+    return "\n".join(out)
+
+
 def split_synced_text(lrc_text: str) -> list[tuple[str, str]]:
     """Parse raw LRC text into [(timestamp_str, lyric_text), ...].
 
@@ -188,6 +232,7 @@ def header_lines(lrc_text: str) -> dict[str, str]:
 
 __all__: Iterable[str] = (
     "LRCDocument",
+    "extract_plain_lyrics",
     "format_duration",
     "format_timestamp_ms",
     "header_lines",

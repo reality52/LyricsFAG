@@ -29,6 +29,8 @@ crash the GUI on startup -- it will silently fall back to the default.
 * ``force``               ``bool``
 * ``dry_run``             ``bool``
 * ``use_audio_analysis``  ``bool``
+* ``embed_in_tags``       ``bool``  (opt-in ID3/Vorbis/MP4/WMA/APEv2
+                                       lyric tag write)
 * ``source``              ``str`` in ``{"auto", "lrclib", "genius"}``
 * ``genius_token``        ``str``  (plaintext; see SECURITY note below)
 * ``audio_model``         ``str``  in ``SUPPORTED_MODELS``
@@ -127,7 +129,7 @@ def sanitize(raw: dict) -> dict:
     if isinstance(folder, str):
         out["folder"] = folder
 
-    for key in ("recursive", "force", "dry_run", "use_audio_analysis"):
+    for key in ("recursive", "force", "dry_run", "use_audio_analysis", "embed_in_tags"):
         val = raw.get(key)
         if isinstance(val, bool):
             out[key] = val

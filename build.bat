@@ -1,19 +1,20 @@
 @echo off
 REM Master build orchestrator for LyricsFAG.
 REM
-REM Two output variants ship side by side into dist\:
-REM   * lite     -- ~50 MB CLI/GUI .exe; downloads faster-whisper + demucs
-REM                 weights on first use (existing behaviour from before
-REM                 the split).
-REM   * portable -- drops the same dependencies in plus the weight files
-REM                 themselves (models\whisper-base\, models\demucs\ when
-REM                 populated); produces ~600 MB self-contained .exe
-REM                 binaries that need no network access.
+REM Two output variants ship side by side into dist\, ONE binary each:
+REM   * lite     -- ~50 MB single dual-mode .exe (LRCLIB + Genius
+REM                 only; downloads whisper + demucs weights on first
+REM                 use).  Entry point lyricsfag.py auto-dispatches to
+REM                 GUI when launched without argv, CLI otherwise.
+REM   * portable -- ~3.5 GB single dual-mode .exe with the full audio
+REM                 stack (torch + demucs + faster-whisper + scipy) +
+REM                 bundled weights (``models\whisper-small\`` ~500 MB,
+REM                 ``models\demucs\`` ~84 MB).  Fully offline.
 REM
 REM Usage:
 REM     build.bat                -- build BOTH variants (default; same as `all`)
-REM     build.bat lite           -- only LyricsFAG-Lite.exe + LyricsFAG-GUI-Lite.exe
-REM     build.bat portable       -- only LyricsFAG-Portable.exe + LyricsFAG-GUI-Portable.exe
+REM     build.bat lite           -- only LyricsFAG-Lite.exe (~50 MB)
+REM     build.bat portable       -- only LyricsFAG-Portable.exe (~3.5 GB)
 REM     build.bat all            -- both variants, sequentially
 REM
 REM Legacy flag still honoured for backward compatibility:
@@ -87,7 +88,7 @@ goto :summary
 
 :build_portable
 echo.
-echo === Building portable variant (LyricsFAG-Portable.exe / -GUI.exe) ===
+echo === Building portable variant (LyricsFAG-Portable.exe; dual-mode) ===
 echo.
 call "%ROOT%build-portable.bat"
 if errorlevel 1 exit /b 1
@@ -96,7 +97,7 @@ exit /b 0
 
 :build_lite
 echo.
-echo === Building lite variant (LyricsFAG-Lite.exe / -GUI.exe) ===
+echo === Building lite variant (LyricsFAG-Lite.exe; dual-mode) ===
 echo.
 call "%ROOT%build-lite.bat"
 if errorlevel 1 exit /b 1
@@ -107,23 +108,21 @@ echo.
 echo === Build complete ===
 echo.
 if /i "%TARGET%"=="all" (
-    echo   dist\LyricsFAG-Lite.exe        ^(CLI,  ~50 MB, downloads models on first use^)
-    echo        usage: dist\LyricsFAG-Lite.exe "C:\Music\Library"
+    echo   dist\LyricsFAG-Lite.exe        ^(dual-mode, ~50 MB, downloads models on first use^)
+    echo     CLI:    dist\LyricsFAG-Lite.exe "C:\Music\Library"
+    echo     GUI:    Double-click in Explorer.  Same .exe -- _wants_gui() auto-dispatches.
     echo.
-    echo   dist\LyricsFAG-GUI-Lite.exe    ^(GUI,  ~50 MB, downloads models on first use^)
-    echo        Double-click to open.
-    echo.
-    echo   dist\LyricsFAG-Portable.exe   ^(CLI,  ~600 MB, fully offline^)
-    echo        usage: dist\LyricsFAG-Portable.exe "C:\Music\Library"
-    echo.
-    echo   dist\LyricsFAG-GUI-Portable.exe ^(GUI,  ~600 MB, fully offline^)
-    echo        Double-click to open.
+    echo   dist\LyricsFAG-Portable.exe   ^(dual-mode, ~3.5 GB, fully offline; seeded small whisper + htdemucs_ft^)
+    echo     CLI:    dist\LyricsFAG-Portable.exe "C:\Music\Library"
+    echo     GUI:    Double-click in Explorer.  Same .exe -- _wants_gui() auto-dispatches.
 ) else if /i "%TARGET%"=="portable" (
-    echo   dist\LyricsFAG-Portable.exe    ^(CLI,  ~600 MB, fully offline^)
-    echo   dist\LyricsFAG-GUI-Portable.exe ^(GUI, ~600 MB, fully offline^)
+    echo   dist\LyricsFAG-Portable.exe   ^(dual-mode, ~3.5 GB, fully offline^)
+    echo     CLI:    dist\LyricsFAG-Portable.exe "C:\Music\Library"
+    echo     GUI:    Double-click in Explorer.  Same .exe ^(--gui=1^).
 ) else (
-    echo   dist\LyricsFAG-Lite.exe        ^(CLI,  ~50 MB, downloads models on first use^)
-    echo   dist\LyricsFAG-GUI-Lite.exe    ^(GUI,  ~50 MB, downloads models on first use^)
+    echo   dist\LyricsFAG-Lite.exe        ^(dual-mode, ~50 MB, downloads models on first use^)
+    echo     CLI:    dist\LyricsFAG-Lite.exe "C:\Music\Library"
+    echo     GUI:    Double-click in Explorer.  Same .exe ^(--gui=1^).
 )
 popd
 endlocal

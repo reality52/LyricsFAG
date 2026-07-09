@@ -88,6 +88,7 @@ from lyricsfag import (  # noqa: E402
     STATUS_WRITTEN,
     ProcessOutcome,
     _format_summary_lines,
+    _format_tags_suffix,
     process_one,
 )
 
@@ -254,6 +255,13 @@ class JobConfig:
     genius_token: Optional[str]
     log_level: int = logging.INFO
     use_audio_analysis: bool = False
+    # Opt-in plain-text tag embedding (USLT / LYRICS / ©lyr /
+    # WM/Lyrics / APEv2 LYRICS).  Inherited from the GUI checkbox;
+    # passed through to :func:`lyricsfag.process_one` as
+    # ``embed_in_tags=...``.  Bypasses dry-run entirely (consistent
+    # with the rest of dry-run semantics -- a dry run reads but never
+    # writes).
+    embed_in_tags: bool = False
     audio_model: str = "base"
     audio_model_path: Optional[Path] = None
     device: str = "auto"           # 'auto' / 'cuda' / 'cpu'
@@ -422,6 +430,7 @@ def _run_worker(
                 root=cfg.root,
                 force=cfg.force,
                 dry_run=cfg.dry_run,
+                embed_in_tags=cfg.embed_in_tags,
             )
             ui_queue.put_nowait(("outcome", outcome))
             counters[outcome.status] = counters.get(outcome.status, 0) + 1
@@ -559,6 +568,17 @@ class LyricsFAGApp(tk.Tk):
             opts, text="Use audio analysis (local)", variable=self.use_audio_var
         )
         self.use_audio_cb.pack(side="left")
+        # ``--embed-in-tags`` opt-in: also write the plain lyrics into
+        # the audio file's native tag (USLT / Vorbis LYRICS / MP4 ©lyr
+        # / WMA WM/Lyrics / APEv2 LYRICS).  Independent of the audio
+        # analysis flag -- LRC-side output is unaffected, the tag gets
+        # only the lyric text.  Off by default; persisted alongside
+        # the rest of the widget state.
+        self.embed_tags_var = tk.BooleanVar(value=False)
+        self.embed_tags_cb = ttk.Checkbutton(
+            opts, text="Embed lyrics in tags", variable=self.embed_tags_var
+        )
+        self.embed_tags_cb.pack(side="left", padx=(14, 0))
         # The 'Use audio analysis' checkbox is auto-enabled / greyed
         # out by ``_on_source_change`` once ``source_var`` is wired up;
         # the ``trace_add`` call lives below the source row (after the
@@ -787,6 +807,16 @@ class LyricsFAGApp(tk.Tk):
                 "this script if they aren't already.",
             ),
             (
+                getattr(self, "embed_tags_cb", None),
+                "Also write a plain-text lyrics tag into each\n"
+                "audio file (ID3 USLT, Vorbis LYRICS, MP4 \\xa9lyr,\n"
+                "WMA WM/Lyrics, APEv2 LYRICS as appropriate).\n"
+                "The .lrc sidecar keeps the synced / header-rich view;\n"
+                "the tag holds just the lyric text. Off by default.\n"
+                "WAV, TAK and raw AAC have no standard tag -- they're\n"
+                "skipped with a log warning, not a batch failure.",
+            ),
+            (
                 getattr(self, "source_combo", None),
                 "auto \u2192 LRCLIB first, then Genius, then local audio.\n"
                                 "lrclib / genius \u2192 only that provider.\n"
@@ -985,6 +1015,7 @@ class LyricsFAGApp(tk.Tk):
             (self.force_var, "force"),
             (self.dry_run_var, "dry_run"),
             (self.use_audio_var, "use_audio_analysis"),
+            (self.embed_tags_var, "embed_in_tags"),
         ):
             if key in loaded:
                 tkvar.set(loaded[key])
@@ -1021,6 +1052,7 @@ class LyricsFAGApp(tk.Tk):
                     "force": self.force_var.get(),
                     "dry_run": self.dry_run_var.get(),
                     "use_audio_analysis": self.use_audio_var.get(),
+                    "embed_in_tags": self.embed_tags_var.get(),
                     "source": self.source_var.get(),
                     "genius_token": self.genius_var.get(),
                     "audio_model": self.audio_model_var.get(),
@@ -1098,6 +1130,7 @@ class LyricsFAGApp(tk.Tk):
             genius_token=self.genius_var.get().strip() or None,
             log_level=self._initial_log_level,
             use_audio_analysis=self.use_audio_var.get(),
+            embed_in_tags=self.embed_tags_var.get(),
             audio_model=self.audio_model_var.get(),
             audio_model_path=audio_model_path,
             device=self.device_choice_var.get(),
@@ -1258,10 +1291,29 @@ class LyricsFAGApp(tk.Tk):
             line += f" ({outcome.reason})"
         elif outcome.detail:
             line += f" ({outcome.detail})"
+        # Optional ``--embed-in-tags`` suffix.  Mirrors
+        # :func:`lyricsfag._format_tags_suffix` so a ``[tags=USLT]``
+        # segment is consistent CLI <-> GUI; tag failure obviously
+        # does NOT downgrade the row colour -- the .lrc was still
+        # written, the tag step just appended a tail.
+        tag_suffix = self._outcome_tags_suffix(outcome)
+        if tag_suffix:
+            line += f" {tag_suffix}"
         self.log_text.configure(state="normal")
         self.log_text.insert("end", line + "\n", (tag,))
         self.log_text.see("end")
         self.log_text.configure(state="disabled")
+
+    @staticmethod
+    def _outcome_tags_suffix(outcome: ProcessOutcome) -> str:
+        """Build the ``[tags=...]`` suffix for an outcome row.
+
+        Thin re-export of :func:`lyricsfag._format_tags_suffix` so the
+        CLI <-> GUI never drift.  Returns ``""`` when the feature was
+        off or no plain lyrics were extracted -- callers skip the
+        suffix entirely in that case.
+        """
+        return _format_tags_suffix(outcome)
 
     def _set_device_badge(self, text: str, fg: str) -> None:
         self.device_var.set(text)

@@ -27,7 +27,10 @@ Design choices (per project design pass):
   dropped, plus a small blocklist for short spurious multi-word tokens.
 * Bundling: the model directory is resolved via ``sys._MEIPASS`` first
   (PyInstaller unpacked location) and falls back to a relative
-  ``models/whisper-base`` next to the package for dev runs.
+  ``models/whisper-small`` next to the package for dev runs.  Older
+  ``models/whisper-base`` trees are still honoured (backward compat with
+  pre-1.3 dev installs that hadn't been re-seeded) but the small/
+  variant wins when both exist.
 """
 
 from __future__ import annotations
@@ -56,9 +59,9 @@ from .lrc import format_timestamp_ms
 
 LOG = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
+# -------------------------------------------------------------------
 # PyTorch 2.6 / demucs 4.0.1 ``weights_only`` compatibility
-# ---------------------------------------------------------------------------
+# -------------------------------------------------------------------
 #
 # The actual monkey-patch lives in the package-internal
 # :mod:`lyricsfag_lib._torch_compat` so :mod:`scripts.download_demucs_model`
@@ -120,10 +123,11 @@ def planned_first_run_download(
     :func:`lyricsfag._build_audio_analyzer` to emit a single WARNING
     *before* per-model warnings fire from deeper in the stack).
 
-    ``will_download_whisper`` is True only when *neither* the bundled
-    ``models/whisper-base`` nor a user-supplied ``--audio-model-path``
-    resolves to an existing directory -- in that branch faster-whisper
-    is forced to fall back to HuggingFace on first use.
+    ``will_download_whisper`` is True only when *neither* a bundled
+    ``models/whisper-small`` / ``models/whisper-base`` nor a
+    user-supplied ``--audio-model-path`` resolves to an existing
+    directory -- in that branch faster-whisper is forced to fall back
+    to HuggingFace on first use.
 
     ``will_download_demucs`` is True when demucs is enabled AND the
     torch hub cache at ``~/.cache/torch/hub/checkpoints`` is empty
@@ -223,12 +227,20 @@ _HALLUCINATION_BLOCKLIST = frozenset({
     "[music]", "(music)", "[applause]", "[laughter]",
 })
 
-# Bundled model location (relative to project root for dev; resolved via
-# ``sys._MEIPASS`` at runtime in the PyInstaller bundled ``.exe``).
-_BUNDLED_MODEL_DIR = Path("models") / "whisper-base"
+# Bundled-model directory candidates, checked in priority order by
+# :func:`_resolve_model_path`.  The portable EXE seeds ``whisper-small``
+# (~500 MB) by default -- a cleaner / less-noisy transcription than
+# ``base`` and what every first-time portable build downloads.  Older
+# v1.2.x dev trees may have seeded ``models/whisper-base``; we still
+# load it when ``whisper-small`` is absent so a checkout that hasn't
+# been re-seeded doesn't lose audio-analysis on the very first run.
+_BUNDLED_MODEL_DIRS: tuple[Path, ...] = (
+    Path("models") / "whisper-small",
+    Path("models") / "whisper-base",
+)
 
 # Default repo path for ``demucs.pretrained.get_model(..., repo=...)``.
-# Mirrors the ``models/whisper-base`` Whisper convention so all bundled
+# Mirrors the ``models/whisper-small`` Whisper convention so all bundled
 # model weights live under a single ``models/`` tree next to the script.
 # Demucs populates this on first run (htdemucs + bag-of-models weights
 # are ~80 MB; the auxiliary ``955717e8-...th`` checkpoint demucs uses
@@ -290,9 +302,9 @@ class AudioAnalyzer(ABC):
     ) -> LyricsResult | LyricsFailure: ...
 
 
-# -----------------------------------------------------------------------
+# ----------------------------------------------------------------------
 # helpers
-# -----------------------------------------------------------------------
+# ----------------------------------------------------------------------
 
 
 def missing_audio_hint(pkg: str) -> str:
@@ -333,15 +345,28 @@ def missing_audio_hint(pkg: str) -> str:
 def _resolve_model_path(model_id: str, model_path: Optional[Path]) -> Optional[Path]:
     """Return the absolute path to use for ``WhisperModel(..., local_files_only=True)``.
 
-    Priority: explicit ``model_path`` -> bundled dir under ``sys._MEIPASS`` ->
-    bundled dir next to the package.
+    Priority: explicit ``model_path`` -> bundled ``models/whisper-small``
+    -> bundled ``models/whisper-base`` (backward compat) -> ``None``
+    (callers fall through to the HuggingFace cache).
+
+    The bundled-directory resolution walks :data:`_BUNDLED_MODEL_DIRS`
+    in priority order and returns the FIRST that exists.  ``model_id``
+    is informational only -- when a bundled directory is found we hand
+    that whole directory to faster-whisper, which infers the size from
+    the directory name (``whisper-small`` / ``whisper-base``) at load
+    time.  Letting the caller override via ``--audio-model-path
+    /path/to/any/size`` still wins over the bundled check (see the
+    ``is not None`` guard above).
     """
     if model_path is not None:
         return Path(model_path).expanduser().resolve()
 
     base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
-    candidate = base / _BUNDLED_MODEL_DIR
-    return candidate if candidate.exists() else None
+    for rel in _BUNDLED_MODEL_DIRS:
+        candidate = base / rel
+        if candidate.exists():
+            return candidate
+    return None
 
 
 def _resolve_demucs_repo() -> Path:
@@ -377,7 +402,7 @@ def _resolve_demucs_repo() -> Path:
     ---------------------------
     To ship a fully pre-bundled exe (no first-run download), also add
     ``--add-data models/demucs;models/demucs`` to ``build.bat`` (mirroring
-    how ``models/whisper-base`` is currently bundled).  The path
+    how ``models/whisper-small`` is currently bundled).  The path
     resolution above already supports that layout -- it just resolves
     to wherever the bundle places ``models/demucs/`` relative to
     ``sys.executable.parent``.
@@ -407,7 +432,6 @@ def _native_demucs_cache_dir() -> Path:
     matches the on-disk location downstream code can inspect.
     """
     return Path.home() / ".cache" / "torch" / "hub" / "checkpoints"
-
 
 
 
@@ -523,9 +547,9 @@ def _detect_instrumental_preflight(audio: AudioFile) -> Optional[LyricsResult]:
     return None  # speech present; let Whisper take over
 
 
-# -----------------------------------------------------------------------
+# ----------------------------------------------------------------------
 # Demucs vocal isolator (optional pre-stage)
-# -----------------------------------------------------------------------
+# ----------------------------------------------------------------------
 
 
 DEMUCS_SR = 44100          # demucs htdemucs native sample rate
@@ -929,9 +953,9 @@ class DemucsIsolator:
         ).astype(np.float32, copy=False)
 
 
-# -----------------------------------------------------------------------
+# ----------------------------------------------------------------------
 # faster-whisper implementation
-# -----------------------------------------------------------------------
+# ----------------------------------------------------------------------
 
 
 class FasterWhisperAnalyzer(AudioAnalyzer):
@@ -1008,7 +1032,7 @@ class FasterWhisperAnalyzer(AudioAnalyzer):
             # Pre-flight warning so the user knows they're about to
             # pull weights down from HuggingFace.  Skipped when the
             # caller supplied ``--audio-model-path`` (or a bundled
-            # ``models/whisper-base`` exists) -- in that branch
+            # ``models/whisper-small`` exists) -- in that branch
             # ``local_files_only`` is True and no network call happens.
             _mb = _WHISPER_DOWNLOAD_HINTS_MB.get(self.model_size)
             if _mb is not None:
@@ -1292,9 +1316,9 @@ class FasterWhisperAnalyzer(AudioAnalyzer):
             return LyricsFailure(self.name, f"transcription error: {exc}")
 
 
-# -----------------------------------------------------------------------
+# ----------------------------------------------------------------------
 # Fake / mock analyzer for tests
-# -----------------------------------------------------------------------
+# ----------------------------------------------------------------------
 
 
 class FakeAnalyzer(AudioAnalyzer):
@@ -1328,9 +1352,10 @@ def describe_models_layout(
     """Return ``(whisper_repo_or_none, demucs_repo)`` so callers can announce the path layout.
 
     ``whisper_repo_or_none`` is ``None`` when neither a user-supplied
-    ``--audio-model-path`` nor a bundled ``models/whisper-base`` exists --
-    in that branch faster-whisper falls back to the HuggingFace cache the
-    first time it sees the model id.
+    ``--audio-model-path`` nor a bundled ``models/whisper-small`` /
+    ``models/whisper-base`` directory exists -- in that branch
+    faster-whisper falls back to the HuggingFace cache the first time
+    it sees the model id.
 
     ``demucs_repo`` is always concrete (it defaults to
     ``models/demucs/`` next to the script even when empty), but

@@ -1,54 +1,59 @@
 @echo off
-REM Build the "portable" LyricsFAG variants: a CLI/GUI .exe pair that
-REM bundles the full audio stack (torch + demucs + faster-whisper +
-REM scipy, installed via ``requirements-audio.txt``) and, when
-REM available, the model weights themselves (models\whisper-base\,
-REM models\demucs\ when populated) for fully offline first-run
-REM operation.
+REM Build the "portable" LyricsFAG variant: a SINGLE .exe that bundles the
+REM full audio stack (torch + demucs + faster-whisper + scipy, installed
+REM via ``requirements-audio.txt``) plus, when available, the model
+REM weights themselves (``models\whisper-small\`` by default,
+REM ``models\whisper-base\`` as a backward-compat fallback,
+REM ``models\demucs\``) for fully offline first-run operation.
 REM
-REM Output (alongside any lite variants):
-REM   dist\LyricsFAG-Portable.exe         -- CLI  (~3.5 GB)
-REM   dist\LyricsFAG-GUI-Portable.exe     -- GUI  (~3.5 GB)
+REM Output (alongside any lite variant):
+REM   dist\LyricsFAG-Portable.exe    -- single dual-mode binary (~3.5 GB)
 REM
-REM Footprint breakdown
-REM -------------------
-REM   * torch (transitive of demucs 4.x)    ~3.8 GB
-REM   * bundled whisper weights             ~150 MB (only if
-REM                                            models\whisper-base\
-REM                                            exists)
-REM   * bundled demucs weights              ~84 MB (only if
-REM                                            models\demucs\*.th
-REM                                            exists; the default
-REM                                            ``htdemucs_ft`` is
-REM                                            a single ~84 MB file;
-REM                                            ``htdemucs`` is a
-REM                                            5-sub-model bag of
-REM                                            ~420 MB)
-REM   * everything else                     ~30 MB
+REM How the dual-mode dispatch works
+REM ---------------------------------
+REM Entry point is ``lyricsfag.py``: when launched with no argv the
+REM :func:`lyricsfag._wants_gui` pre-check returns ``True`` and the
+REM Tk window pops up (overlaying the console host pyinstaller
+REM allocated via ``--console``).  When launched from a terminal with
+REM a path or any flag the same .exe runs the CLI loop.  This is the
+REM standard Windows pattern (``git.exe``, ``pythonw.exe``, ...).
+REM
+REM What gets baked in (when seeded)
+REM ---------------------------------
+REM   * torch (~3.8 GB; transitively via demucs)
+REM   * demucs + faster-whisper + scipy (via requirements-audio.txt)
+REM   * models\whisper-small\model.bin (~500 MB; the v1.2.1 default
+REM     Whisper size -- cleaner transcription than ``base`` and what
+REM     ``download_whisper_model.py`` drops when run with no flags).
+REM     Falls back to models\whisper-base\model.bin (~150 MB) when the
+REM     small/ seed is missing AND the base/ seed is present (dev-tree
+REM     v1.2.x compatibility).
+REM   * models\demucs\*.th files (~84-336 MB; htdemucs_ft default)
+REM   * everything else ~30 MB
 REM
 REM Prerequisite for a fully-bundled build:
-REM   python scripts\download_whisper_model.py --size base
+REM   REM 1. Whisper small weights (~500 MB)
+REM   python scripts\download_whisper_model.py
+REM   REM 2. Demucs weights for the default 'htdemucs_ft' (~84 MB single model
+REM   REM    under demucs 4.0.1; the legacy 5-sub-model bag still applies
+REM   REM    only when --demucs-model htdemucs is explicitly pinned).
 REM   python scripts\download_demucs_model.py
-REM     (defaults to htdemucs_ft, Meta's music-only fine-tune, ~84 MB.
-REM      Pass --model htdemucs to seed the legacy 5-sub-model BagOfModels
-REM      instead; LyricsFAG only uses that one when explicitly pinned via
-REM      DemucsIsolator(model="htdemucs") / FasterWhisperAnalyzer(demucs_model="htdemucs").)
+REM   REM 3. (Optional) End-to-end load check before baking into the .exe.
+REM   python scripts\download_demucs_model.py --verify
 REM
-REM The build will skip whichever model directories are absent (and warn
-REM about it), so a quick `build-portable.bat` run without seeded
-REM weights produces a partially-portable .exe that still downloads the
-REM missing bits on first use.
+REM Without seeded weights the .exe ships as partially-portable: it
+REM still ships torch + demucs + faster-whisper, but on first use the
+REM missing ``model.bin`` / ``*.th`` files download from the cache the
+REM normal way.
 REM
 REM Cleanup
 REM -------
-REM We DO clean our own previous .spec + .exe at the top so a
-REM standalone re-run of this script (or the orchestrator's
-REM ``all`` path, which wipes everything anyway) gets a fresh
-REM PyInstaller pass without stale configs.  We do NOT clean the
-REM whole ``dist\`` -- the orchestrator only does that when
-REM ``all`` is requested, and a single-target build is meant to
-REM leave the other variant's outputs alone.  This was the
-REM v1.1.3 reviewer-flagged behaviour.
+REM Standalone re-run cleanup: we wipe our own previous .spec + .exe
+REM only.  The orchestrator's ``build.bat all`` does a wholesale wipe.
+REM The v1.1.3 reviewer-flagged behaviour (variant script wipes the
+REM whole dist\ so the other variant's outputs vanish) is preserved
+REM HERE so the user can rebuild one variant at a time without losing
+REM the other.
 
 setlocal
 
@@ -56,14 +61,8 @@ set "ROOT=%~dp0"
 pushd "%ROOT%"
 
 echo === Cleaning our own previous outputs ===
-REM See the matching block in build-lite.bat for the rationale --
-REM the orchestrator only wipes dist\ wholesale when ``all`` is
-REM requested, so single-target builds preserve the other
-REM variant's outputs.
 if exist dist\LyricsFAG-Portable.exe      del /q dist\LyricsFAG-Portable.exe
-if exist dist\LyricsFAG-GUI-Portable.exe  del /q dist\LyricsFAG-GUI-Portable.exe
 if exist LyricsFAG-Portable.spec          del /q LyricsFAG-Portable.spec
-if exist LyricsFAG-GUI-Portable.spec      del /q LyricsFAG-GUI-Portable.spec
 
 echo === Installing build + runtime dependencies (portable) ===
 pip install --upgrade pip
@@ -76,27 +75,39 @@ REM log output; both flags can coexist safely.
 set "WHISPER_ARGS="
 set "DEMUCS_ARGS="
 
-REM Whisper weights: bundle when models\whisper-base\model.bin exists.
-REM The same probe semantics as the previous monolithic build.bat, kept
-REM verbatim so an already-seeded repo doesn't get re-implemented.
-REM Reference: scripts/download_whisper_model.py writes model.bin into
-REM models\whisper-base\ and that path is what PyInstaller's --add-data
-REM will pick up.
-if exist models\whisper-base (
+REM Whisper weights: prefer models\whisper-small\ (~500 MB; the v1.2.1
+REM default).  Fall back to models\whisper-base\ (~150 MB) when the small/
+REM directory is missing AND the base/ seed is present -- that keeps
+REM v1.2.x dev trees working without forcing a re-seed.
+if exist models\whisper-small (
+    if exist models\whisper-small\model.bin (
+        echo Bundling models\whisper-small\ into the .exe (~500 MB).
+        set "WHISPER_ARGS=--add-data models\whisper-small;models\whisper-small --collect-all faster_whisper"
+    ) else (
+        echo.
+        echo === WARNING: models\whisper-small\ exists but model.bin is missing ===
+        echo   The bundled .exe will require users to run
+        echo   `python scripts\download_whisper_model.py` (default --size small)
+        echo   on the target machine BEFORE --use-audio-analysis works.
+        echo   Get it from https://huggingface.co/Systran/faster-whisper-small (484 MB).
+        set "WHISPER_ARGS=--collect-all faster_whisper"
+    )
+) else if exist models\whisper-base (
     if exist models\whisper-base\model.bin (
-        echo Bundling models\whisper-base\ into the .exe (~150 MB).
-        set "WHISPER_ARGS=--add-data models\whisper-base;models\whisper-base --hidden-import faster_whisper"
+        echo Bundling models\whisper-base\ into the .exe (~150 MB; backward-compat).
+        echo NOTE: models\whisper-small not seeded; falling back to the v1.2.x default.
+        echo       Run `python scripts\download_whisper_model.py` to switch to small.
+        set "WHISPER_ARGS=--add-data models\whisper-base;models\whisper-base --collect-all faster_whisper"
     ) else (
         echo.
         echo === WARNING: models\whisper-base\ exists but model.bin is missing ===
-        echo   The bundled .exe will require users to run
-        echo   `python scripts\download_whisper_model.py --size base`
+        echo   The bundled .exe will require users to manually re-run
+        echo   `python scripts\download_whisper_model.py` (default --size small)
         echo   on the target machine BEFORE --use-audio-analysis works.
-        echo   Get it from https://huggingface.co/Systran/faster-whisper-base (138 MB).
-        set "WHISPER_ARGS=--hidden-import faster_whisper"
+        set "WHISPER_ARGS=--collect-all faster_whisper"
     )
 ) else (
-    set "WHISPER_ARGS=--hidden-import faster_whisper"
+    set "WHISPER_ARGS=--collect-all faster_whisper"
 )
 
 REM Demucs weights: bundle when models\demucs\ has at least one .th.
@@ -122,7 +133,7 @@ if not errorlevel 1 (
 )
 
 echo.
-echo === Building CLI binary (LyricsFAG-Portable.exe) ===
+echo === Building dual-mode binary (LyricsFAG-Portable.exe) ===
 pyinstaller ^
   --noconfirm ^
   --onefile ^
@@ -135,22 +146,10 @@ pyinstaller ^
 if errorlevel 1 goto :fail
 
 echo.
-echo === Building GUI binary (LyricsFAG-GUI-Portable.exe, windowed) ===
-pyinstaller ^
-  --noconfirm ^
-  --onefile ^
-  --windowed ^
-  --name LyricsFAG-GUI-Portable ^
-  --paths . ^
-  %WHISPER_ARGS% ^
-  %DEMUCS_ARGS% ^
-  lyricsfag_gui.py
-if errorlevel 1 goto :fail
-
-echo.
 echo === Portable build complete ===
-echo   dist\LyricsFAG-Portable.exe       (CLI,  ~3.5 GB; torch+demucs+faster-whisper+models)
-echo   dist\LyricsFAG-GUI-Portable.exe   (GUI,  ~3.5 GB; torch+demucs+faster-whisper+models)
+echo   dist\LyricsFAG-Portable.exe    (~3.5 GB; torch+demucs+faster-whisper+small-whisper+demucs-weights; dual-mode)
+echo     Double-click in Explorer -> GUI window.
+echo     From PowerShell:           dist\LyricsFAG-Portable.exe "C:\Music\Library"
 popd
 endlocal
 exit /b 0

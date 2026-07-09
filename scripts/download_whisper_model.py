@@ -28,9 +28,14 @@ Default usage ::
 
     python scripts/download_whisper_model.py
 
-Drops the ``base`` checkpoint into ``models/whisper-base/`` next to the
-project so ``--audio-model-path models/whisper-base`` and the PyInstaller
-bundle work offline.
+Drops the ``small`` checkpoint into ``models/whisper-small/`` next to
+the project so ``--audio-model-path models/whisper-small`` and the
+PyInstaller bundle work offline.  The ``small`` size was picked as the
+v1.2.1 default because the portable build bakes whichever
+``models/whisper-{small,base}`` directory it finds, and ``small``
+(``Systran/faster-whisper-small``) gives noticeably cleaner LRC
+timestamps than ``base`` at the cost of ~500 MB instead of ~150 MB.
+Pass ``--size base`` explicitly if you want the smaller footprint.
 """
 
 from __future__ import annotations
@@ -65,8 +70,8 @@ DEFAULT_MIRROR = "https://hf-mirror.com"
 # HuggingFace metadata endpoint -- lists sibling files for the model repo.
 HF_API = "https://huggingface.co/api/models/{repo_id}"
 
-DEFAULT_OUTPUT_DIR = "models/whisper-base"
-DEFAULT_SIZE = "base"
+DEFAULT_OUTPUT_DIR = "models/whisper-small"
+DEFAULT_SIZE = "small"
 
 EXPECTED_FILES = (
     "config.json",
